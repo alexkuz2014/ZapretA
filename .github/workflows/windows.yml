@@ -1,0 +1,71 @@
+name: Windows CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-test-audit:
+    runs-on: windows-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Install pinned Rust toolchain
+        uses: actions-rust-lang/setup-rust-toolchain@v2
+        with:
+          cache: true
+
+      - name: Show toolchain
+        run: rustc --version; cargo --version
+        shell: pwsh
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      - name: Run Clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Run tests
+        run: cargo test --workspace
+
+      - name: Install dependency audit tools
+        run: |
+          cargo install --locked cargo-audit --version 0.22.2
+          cargo install --locked cargo-deny --version 0.20.2
+        shell: pwsh
+
+      - name: Audit advisories
+        run: cargo audit
+
+      - name: Check dependency policy
+        run: cargo deny check
+
+      - name: Build release executable
+        run: cargo build --release -p zapreta
+
+      - name: Create SHA-256 manifest
+        run: |
+          $exe = "target\release\zapreta.exe"
+          if (-not (Test-Path -LiteralPath $exe)) { throw "Missing release executable: $exe" }
+          $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $exe).Hash.ToLowerInvariant()
+          "$hash  zapreta.exe" | Set-Content -Encoding ascii SHA256SUMS.txt
+          Get-Content SHA256SUMS.txt
+        shell: pwsh
+
+      - name: Upload Windows build and checksum
+        uses: actions/upload-artifact@v4
+        with:
+          name: ZapretA-windows-x64
+          path: |
+            target/release/zapreta.exe
+            SHA256SUMS.txt
+          if-no-files-found: error
+          retention-days: 14

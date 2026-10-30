@@ -106,7 +106,7 @@ Score: жёсткий gate по контрольной цели и HTTP/TLS за
 - `zapreta` CLI: `--version`, `--validate-catalog <path>`, `--diagnose`. Последняя команда обращается к `dns.google`, `www.youtube.com`, `example.com`; не меняет настройки и не запускает движок.
 - `catalog/format-example.toml` — демонстрация схемы, не исполняемый профиль; версия движка намеренно не закреплена.
 
-Проверено на Windows x64 через target `x86_64-pc-windows-gnullvm`: 15 unit-тестов, `cargo clippy --workspace --all-targets -- -D warnings`, `--version` и пример каталога прошли. `--diagnose` локально выполнил DNS и HTTPS запросы: YouTube вернул HTTP 204, `example.com` — HTTP 200; system DNS и DoH различались по наличию AAAA в системном ответе, что не доказывает подмену. MSVC target локально пока не проверен из-за отсутствующего `dbghelp.lib`; GitHub CI для штатного MSVC toolchain ещё не настроен.
+Локально на Windows x64 через target `x86_64-pc-windows-gnullvm` прошли 15 unit-тестов, Clippy с `-D warnings`, `--version` и пример каталога. Реальная `--diagnose` проверка ранее получила HTTP 204 от YouTube и HTTP 200 от `example.com`; она не является повторяемым тестом. Для дальнейшей разработки добавлены закреплённый Rust toolchain, MSVC workflow и development setup в `docs/DEV_SETUP.md`. CI ещё не исполнялся для этих изменений; MSVC нужно подтвердить первым GitHub Actions запуском.
 
 ## Открытые вопросы до этапа 2
 

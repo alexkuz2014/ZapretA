@@ -6,8 +6,8 @@ license.workspace = true
 rust-version.workspace = true
 
 [dependencies]
-zapreta-core = { path = "../core" }
-zapreta-net = { path = "../net" }
+zapreta-core = { version = "0.1.0", path = "../core" }
+zapreta-net = { version = "0.1.0", path = "../net" }
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 
 [[bin]]

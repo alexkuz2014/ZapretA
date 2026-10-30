@@ -28,11 +28,14 @@ The current `--diagnose` command directly queries the configured system DNS reso
 - [x] Add initial manual system DNS, Google DoH, and HTTPS checks.
 - [ ] Classify probe signals and implement sequential strategy selection.
 - [ ] Add tray status, safe cleanup, and diagnostics.
-- [ ] Set up Windows CI and publish a verified release.
+- [x] Add Windows MSVC CI, dependency policy checks, and a checksummed CI artifact.
+- [ ] Publish a reviewed and verified release.
 
 ## Build and run
 
 The CLI can validate the example catalog and run the initial network diagnostic with `cargo run -p zapreta -- --diagnose`. The catalog is only a schema demonstration and cannot start an engine. The diagnostic contacts `dns.google`, `www.youtube.com`, and `example.com`; it does not perform traffic handling or prove that a site works in a browser. Build and check the workspace with `cargo test --workspace` and `cargo clippy --workspace --all-targets -- -D warnings`. Do not download executables from unofficial sources claiming to be ZapretA.
+
+See [Development setup](docs/DEV_SETUP.md) for the pinned Rust toolchain, MSVC requirements, CI checks, and artifact details. GitHub Actions builds a temporary Windows executable and SHA-256 manifest; this is not an official release or signed binary.
 
 ## Security and trust
 

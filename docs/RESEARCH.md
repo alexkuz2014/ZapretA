@@ -10,6 +10,8 @@
 
 Источники: [Google Public DNS JSON API](https://developers.google.com/speed/public-dns/docs/doh/json), [reqwest documentation](https://docs.rs/reqwest/latest/reqwest/).
 
+Для `cargo deny` в список допустимых лицензий добавлена `CDLA-Permissive-2.0`, объявленная upstream crate `webpki-roots 1.0.11` (корневые сертификаты для TLS). Это явное разрешение лицензии зависимости, а не подтверждение лицензий будущих upstream executable/driver компонентов; их всё равно нужно разбирать отдельно.
+
 | Источник | Что проверено / полезно | Решение и ограничения |
 |---|---|---|
 | [Flowseal zapret-discord-youtube](https://github.com/Flowseal/zapret-discord-youtube) | Получен архив публичной `main`, локально просмотрены README, service и все 22 `general*.bat`. Профили состоят из нескольких `--filter-* ... --new`; обнаружены fake, fakedsplit, multisplit, multidisorder, syndata, hostfakesplit, QUIC/TLS payload, Discord и Game Filter. README описывает установку службы, диагностику, обновление списков и предупреждает о WinDivert AV-детектах. | Использовать как источник конфигураций только после фиксации commit/tag и сверки лицензий файлов. Не встраивать бинарники из произвольного архива. Значения профилей меняются, результаты сейчас относятся к `main` на момент среза. |
