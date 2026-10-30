@@ -31,7 +31,7 @@
 
 Пример каталога можно проверить командой `cargo run -p zapreta -- --validate-catalog catalog/format-example.toml`. Это только пример формата: он не запускает обход. Команда `cargo run -p zapreta -- --diagnose` делает прямые DNS-запросы к системному резолверу и `dns.google`, а также ограниченные HTTPS-запросы к `www.youtube.com` и `example.com`. Она не меняет системные настройки, не запускает движок и не доказывает наличие DPI. Диагностику можно запускать только если вы согласны с этими сетевыми запросами. Для проверки сборки используйте `cargo test --workspace` и `cargo clippy --workspace --all-targets -- -D warnings`. Готового `.exe` пока нет. Не скачивайте исполняемые файлы со сторонних сайтов, которые называют себя сборками ZapretA.
 
-Настройка Rust/MSVC и описание CI: [docs/DEV_SETUP.md](docs/DEV_SETUP.md). Workflow собирает временный `.exe` и файл SHA-256 как артефакт запуска GitHub Actions; это не официальный релиз и не подписанный бинарник.
+Настройка Rust/MSVC и описание CI: [docs/DEV_SETUP.md](docs/DEV_SETUP.md). [Windows CI прошёл](https://github.com/alexkuz2014/ZapretA/actions/runs/41042507801) и загрузил временный `.exe` с файлом SHA-256 как артефакт workflow; это не официальный релиз и не подписанный бинарник.
 
 ## Безопасность
 

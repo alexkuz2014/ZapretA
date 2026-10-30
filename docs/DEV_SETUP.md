@@ -50,7 +50,7 @@ cargo deny check
 
 Локальный `x86_64-pc-windows-gnullvm` использовался как запасной вариант, когда в установленном MSVC окружении не хватало `dbghelp.lib`. Он полезен для разработки, но CI и будущие релизы должны собираться целевым `x86_64-pc-windows-msvc`.
 
-На разработческой машине после добавления pinned toolchain локально прошли форматирование, Clippy `-D warnings`, 15 unit-тестов, `cargo audit`, `cargo deny check` и MSVC `cargo build --release -p zapreta`. В `cargo deny` остаются предупреждения о двух парах транзитивных версий (`base64`, `winnow`); checks advisory, bans, licenses и sources завершились успешно. Это локальный результат, он не заменяет выполнение GitHub Actions на чистом runner.
+На разработческой машине после добавления pinned toolchain локально прошли форматирование, Clippy `-D warnings`, 15 unit-тестов, `cargo audit`, `cargo deny check` и MSVC `cargo build --release -p zapreta`. В `cargo deny` остаются предупреждения о двух парах транзитивных версий (`base64`, `winnow`); checks advisory, bans, licenses и sources завершились успешно. GitHub Actions для commit `3ba0e68` также завершился успешно: [Windows CI run](https://github.com/alexkuz2014/ZapretA/actions/runs/41042507801).
 
 ## Границы текущего приложения
 

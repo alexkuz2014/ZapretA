@@ -106,7 +106,7 @@ Score: жёсткий gate по контрольной цели и HTTP/TLS за
 - `zapreta` CLI: `--version`, `--validate-catalog <path>`, `--diagnose`. Последняя команда обращается к `dns.google`, `www.youtube.com`, `example.com`; не меняет настройки и не запускает движок.
 - `catalog/format-example.toml` — демонстрация схемы, не исполняемый профиль; версия движка намеренно не закреплена.
 
-Локально на Windows x64 через target `x86_64-pc-windows-gnullvm` прошли 15 unit-тестов, Clippy с `-D warnings`, `--version` и пример каталога. Реальная `--diagnose` проверка ранее получила HTTP 204 от YouTube и HTTP 200 от `example.com`; она не является повторяемым тестом. Для дальнейшей разработки добавлены закреплённый Rust toolchain, MSVC workflow и development setup в `docs/DEV_SETUP.md`. CI ещё не исполнялся для этих изменений; MSVC нужно подтвердить первым GitHub Actions запуском.
+Локально на Windows x64 через target `x86_64-pc-windows-gnullvm` ранее прошли 15 unit-тестов, Clippy с `-D warnings`, `--version` и пример каталога. После добавления pinned toolchain те же 15 тестов, Clippy и release build также прошли локально на MSVC. `cargo audit` не нашёл advisories; `cargo deny check` прошёл advisory/bans/licenses/sources с предупреждениями о дублирующихся `base64` и `winnow`. Реальная `--diagnose` проверка ранее получила HTTP 204 от YouTube и HTTP 200 от `example.com`; она не является повторяемым тестом. GitHub Actions run для commit `3ba0e68` прошёл Windows MSVC форматирование, Clippy, тесты, аудит зависимостей, release build и upload checksum artifact: https://github.com/alexkuz2014/ZapretA/actions/runs/41042507801.
 
 ## Открытые вопросы до этапа 2
 
