@@ -51,6 +51,12 @@ pub fn is_conflicting_process_name(name: &str) -> bool {
     )
 }
 
+fn is_process_snapshot_complete(error: &io::Error) -> bool {
+    // Win32 ERROR_NO_MORE_FILES is the documented end-of-enumeration result
+    // for Process32FirstW/Process32NextW.
+    error.raw_os_error() == Some(18)
+}
+
 /// Finds known packet-filtering tools that can conflict with a future engine.
 /// It only observes process names and never stops or modifies other processes.
 #[cfg(target_os = "windows")]
@@ -85,6 +91,15 @@ pub fn find_conflicting_processes() -> Result<Vec<EngineConflict>, EngineError> 
     };
     // SAFETY: entry is writable and correctly sized for PROCESSENTRY32W.
     let mut has_entry = unsafe { Process32FirstW(snapshot, &mut entry) } != 0;
+    if !has_entry {
+        let error = io::Error::last_os_error();
+        if is_process_snapshot_complete(&error) {
+            return Ok(Vec::new());
+        }
+        return Err(EngineError(format!(
+            "cannot read first process during conflict detection: {error}"
+        )));
+    }
     let mut conflicts = Vec::new();
     while has_entry {
         let end = entry
@@ -101,6 +116,14 @@ pub fn find_conflicting_processes() -> Result<Vec<EngineConflict>, EngineError> 
         }
         // SAFETY: entry remains writable and correctly sized.
         has_entry = unsafe { Process32NextW(snapshot, &mut entry) } != 0;
+        if !has_entry {
+            let error = io::Error::last_os_error();
+            if !is_process_snapshot_complete(&error) {
+                return Err(EngineError(format!(
+                    "cannot continue process enumeration for conflict detection: {error}"
+                )));
+            }
+        }
     }
     Ok(conflicts)
 }
@@ -440,6 +463,19 @@ mod tests {
         for name in ["zapreta.exe", "chrome.exe", "goodbyedpi-helper.exe"] {
             assert!(!is_conflicting_process_name(name), "{name}");
         }
+    }
+
+    #[test]
+    fn process_enumeration_only_accepts_no_more_files_as_completion() {
+        assert!(is_process_snapshot_complete(&io::Error::from_raw_os_error(
+            18
+        )));
+        assert!(!is_process_snapshot_complete(
+            &io::Error::from_raw_os_error(5)
+        ));
+        assert!(!is_process_snapshot_complete(&io::Error::other(
+            "process enumeration failed"
+        )));
     }
 
     #[test]
