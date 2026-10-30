@@ -36,6 +36,9 @@ async fn main() -> ExitCode {
 async fn diagnose() -> ExitCode {
     use std::time::Duration;
     use zapreta_net::{AllowedHost, DnsResolver, HttpsProber, NetworkPurpose};
+    use zapreta_probe::{
+        BaselineReport, CheckStatus, DnsBaseline, DnsFamilyResult, Observation, dns_baseline_signal,
+    };
 
     let resolver = match DnsResolver::new(Duration::from_secs(5)) {
         Ok(resolver) => resolver,
@@ -58,10 +61,16 @@ async fn diagnose() -> ExitCode {
     );
 
     let mut all_passed = true;
+    let mut target_dns: Option<(zapreta_net::DnsResolution, zapreta_net::DnsResolution)> = None;
     for hostname in ["www.youtube.com", "example.com"] {
         println!("\nDNS: {hostname}");
         let system = resolver.system(hostname).await;
         let doh = resolver.doh(hostname).await;
+        if hostname == "www.youtube.com" {
+            if let (Ok(system), Ok(doh)) = (&system, &doh) {
+                target_dns = Some((system.clone(), doh.clone()));
+            }
+        }
         match (&system, &doh) {
             (Ok(system), Ok(doh)) if system.addresses == doh.addresses => {
                 println!("  Системный DNS и DoH вернули одинаковые адреса.");
@@ -88,6 +97,7 @@ async fn diagnose() -> ExitCode {
     }
 
     println!("\nHTTPS:");
+    let mut endpoint_results = Vec::new();
     for (hostname, path) in [("www.youtube.com", "/generate_204"), ("example.com", "/")] {
         let host = match AllowedHost::new(hostname, NetworkPurpose::Probe) {
             Ok(host) => host,
@@ -98,28 +108,92 @@ async fn diagnose() -> ExitCode {
             }
         };
         match https.get(&host, path, 16 * 1024).await {
-            Ok(result) if (200..300).contains(&result.status_code) => println!(
-                "  {hostname}: HTTP {}, {} ms, read {} bytes{}",
-                result.status_code,
-                result.elapsed_ms,
-                result.bytes_read,
-                if result.body_limited {
-                    " (body limit reached)"
-                } else {
-                    ""
-                }
-            ),
             Ok(result) => {
-                all_passed = false;
+                let passed = (200..300).contains(&result.status_code);
+                if !passed {
+                    all_passed = false;
+                }
                 println!(
-                    "  {hostname}: HTTP {} in {} ms",
-                    result.status_code, result.elapsed_ms
+                    "  {hostname}: HTTP {}, {} ms, read {} bytes{}",
+                    result.status_code,
+                    result.elapsed_ms,
+                    result.bytes_read,
+                    if result.body_limited {
+                        " (body limit reached)"
+                    } else {
+                        ""
+                    }
                 );
+                endpoint_results.push((hostname, Some(result.status_code)));
             }
             Err(error) => {
                 all_passed = false;
                 println!("  {hostname}: {error}");
+                endpoint_results.push((hostname, None));
             }
+        }
+    }
+    if let Some((system, doh)) = target_dns {
+        let split = |resolution: &zapreta_net::DnsResolution, is_v4: bool| {
+            let addresses = resolution
+                .addresses
+                .iter()
+                .copied()
+                .filter(|ip| ip.is_ipv4() == is_v4)
+                .collect();
+            DnsFamilyResult::from_result(CheckStatus::Passed, addresses)
+        };
+        let dns = DnsBaseline {
+            system_a: split(&system, true),
+            system_aaaa: split(&system, false),
+            doh_a: split(&doh, true),
+            doh_aaaa: split(&doh, false),
+            doh_provider: Observation::Known(doh.provider.to_owned()),
+        };
+        let tcp_control = endpoint_results
+            .iter()
+            .find(|(host, _)| *host == "example.com")
+            .map(|(_, status)| *status);
+        let tcp_target = endpoint_results
+            .iter()
+            .find(|(host, _)| *host == "www.youtube.com")
+            .map(|(_, status)| *status);
+        if let (Some(control_status), Some(target_status)) = (tcp_control, tcp_target) {
+            let endpoint = |name: &str, status: Option<u16>| zapreta_probe::EndpointResult {
+                endpoint: name.to_owned(),
+                dns: CheckStatus::Passed,
+                // An HTTP response proves TCP and TLS completed, even for 4xx/5xx.
+                tcp: if status.is_some() {
+                    CheckStatus::Passed
+                } else {
+                    CheckStatus::NotRun
+                },
+                tls: if status.is_some() {
+                    CheckStatus::Passed
+                } else {
+                    CheckStatus::NotRun
+                },
+                content: match status {
+                    Some(code) if (200..300).contains(&code) => CheckStatus::Passed,
+                    Some(_) => CheckStatus::Failed,
+                    None => CheckStatus::NotRun,
+                },
+            };
+            let report = BaselineReport {
+                target: "www.youtube.com".into(),
+                control: endpoint("example.com", control_status),
+                target_result: endpoint("www.youtube.com", target_status),
+                signal: dns_baseline_signal(&dns),
+                dns,
+            };
+            println!("\nСводный DNS-сигнал: {:?}", report.signal);
+            println!(
+                "TLS/HTTPS сигнал: {:?}",
+                Observation::Known(zapreta_probe::classify(
+                    &report.control,
+                    &report.target_result
+                ))
+            );
         }
     }
     println!("\nДиагностика завершена. Никакая стратегия обхода не запускалась.");
