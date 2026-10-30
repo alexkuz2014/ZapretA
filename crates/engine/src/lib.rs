@@ -32,6 +32,86 @@ impl std::fmt::Display for EngineError {
 
 impl std::error::Error for EngineError {}
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EngineConflict {
+    pub process_id: u32,
+    pub executable: String,
+}
+
+impl std::fmt::Display for EngineConflict {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{} (PID {})", self.executable, self.process_id)
+    }
+}
+
+pub fn is_conflicting_process_name(name: &str) -> bool {
+    matches!(
+        name.to_ascii_lowercase().as_str(),
+        "winws.exe" | "goodbyedpi.exe" | "goodbyedpi_x64.exe" | "goodbyedpi_x86.exe"
+    )
+}
+
+/// Finds known packet-filtering tools that can conflict with a future engine.
+/// It only observes process names and never stops or modifies other processes.
+#[cfg(target_os = "windows")]
+pub fn find_conflicting_processes() -> Result<Vec<EngineConflict>, EngineError> {
+    use windows_sys::Win32::{
+        Foundation::{CloseHandle, INVALID_HANDLE_VALUE},
+        System::Diagnostics::ToolHelp::{
+            CreateToolhelp32Snapshot, PROCESSENTRY32W, Process32FirstW, Process32NextW,
+            TH32CS_SNAPPROCESS,
+        },
+    };
+
+    // SAFETY: returned snapshot handle is checked and closed below.
+    let snapshot = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) };
+    if snapshot == INVALID_HANDLE_VALUE || snapshot.is_null() {
+        return Err(EngineError(format!(
+            "cannot enumerate processes for conflict detection: {}",
+            io::Error::last_os_error()
+        )));
+    }
+    struct SnapshotHandle(windows_sys::Win32::Foundation::HANDLE);
+    impl Drop for SnapshotHandle {
+        fn drop(&mut self) {
+            // SAFETY: this handle is owned by SnapshotHandle.
+            unsafe { CloseHandle(self.0) };
+        }
+    }
+    let _snapshot = SnapshotHandle(snapshot);
+    let mut entry = PROCESSENTRY32W {
+        dwSize: std::mem::size_of::<PROCESSENTRY32W>() as u32,
+        ..Default::default()
+    };
+    // SAFETY: entry is writable and correctly sized for PROCESSENTRY32W.
+    let mut has_entry = unsafe { Process32FirstW(snapshot, &mut entry) } != 0;
+    let mut conflicts = Vec::new();
+    while has_entry {
+        let end = entry
+            .szExeFile
+            .iter()
+            .position(|unit| *unit == 0)
+            .unwrap_or(entry.szExeFile.len());
+        let executable = String::from_utf16_lossy(&entry.szExeFile[..end]);
+        if is_conflicting_process_name(&executable) {
+            conflicts.push(EngineConflict {
+                process_id: entry.th32ProcessID,
+                executable,
+            });
+        }
+        // SAFETY: entry remains writable and correctly sized.
+        has_entry = unsafe { Process32NextW(snapshot, &mut entry) } != 0;
+    }
+    Ok(conflicts)
+}
+
+#[cfg(not(target_os = "windows"))]
+pub fn find_conflicting_processes() -> Result<Vec<EngineConflict>, EngineError> {
+    Err(EngineError(
+        "conflict detection is only supported on Windows".into(),
+    ))
+}
+
 #[derive(Debug, Clone)]
 pub struct EngineBundle {
     executable: PathBuf,
@@ -86,6 +166,17 @@ impl VerifiedEngine {
     }
 
     pub fn spawn(&self, args: &[String]) -> Result<EngineProcess, EngineError> {
+        let conflicts = find_conflicting_processes()?;
+        if !conflicts.is_empty() {
+            return Err(EngineError(format!(
+                "conflicting packet-filtering processes detected: {}",
+                conflicts
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )));
+        }
         let parent = self
             .executable
             .parent()
@@ -324,6 +415,22 @@ fn hash_reader(reader: &mut impl Read) -> io::Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn detects_known_conflicting_process_names_case_insensitively() {
+        for name in [
+            "winws.exe",
+            "WINWS.EXE",
+            "goodbyedpi.exe",
+            "goodbyedpi_x64.exe",
+            "goodbyedpi_x86.exe",
+        ] {
+            assert!(is_conflicting_process_name(name), "{name}");
+        }
+        for name in ["zapreta.exe", "chrome.exe", "goodbyedpi-helper.exe"] {
+            assert!(!is_conflicting_process_name(name), "{name}");
+        }
+    }
 
     #[test]
     fn verifies_sha256_before_launch() {
