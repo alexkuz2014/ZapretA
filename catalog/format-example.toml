@@ -1,0 +1,19 @@
+# Schema demonstration only. The matching engine is not bundled or pinned yet.
+schema_version = 1
+engine_version = "not-yet-pinned"
+source_revision = "176f56dc3f11ce5915c26abcdde903f93d835b64"
+
+[[strategies]]
+id = "schema-example"
+label = "Schema example (not runnable)"
+wire_tcp = ["80", "443"]
+wire_udp = ["443"]
+
+[[strategies.rules]]
+transport = "tcp"
+ports = ["443"]
+hostlists = ["lists/list-general.txt"]
+desync_methods = ["multi-split"]
+split_position = 1
+split_sequence_overlap = 568
+split_pattern = "bin/tls_clienthello_4pda_to.bin"

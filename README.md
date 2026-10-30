@@ -4,7 +4,7 @@
 
 **Automatically diagnose and improve access to websites affected by network filtering.** ZapretA is a planned portable Windows application written in Rust. It will test network connectivity, try a verified traffic-handling strategy, and report whether the connection improves.
 
-> **Project status: research and architecture.** The application is not implemented yet. There is no executable, installer, automatic traffic handling, or release build at this time.
+> **Project status: early development.** The Rust workspace, catalog validation, diagnostic signal types, and verified engine process boundary are in place. There is no bundled engine, active network probe, automatic traffic handling, or release build yet.
 
 ## What ZapretA aims to do
 
@@ -23,15 +23,15 @@ These are project goals, not features available today. Results will depend on th
 ## Development status
 
 - [x] Initial research and architecture proposal.
-- [ ] Approve the architecture and privilege model.
-- [ ] Build the Rust workspace and core modules.
+- [x] Approve and start the Rust workspace architecture.
+- [x] Build the Rust workspace, catalog validator, and engine process boundary.
 - [ ] Implement network checks and sequential strategy selection.
 - [ ] Add tray status, safe cleanup, and diagnostics.
 - [ ] Set up Windows CI and publish a verified release.
 
 ## Build and run
 
-There is no application source code or `Cargo.toml` yet, so the project cannot currently be built or run. Do not download executables from unofficial sources claiming to be ZapretA.
+The current CLI can validate the example catalog. The example is only a schema demonstration and cannot be used to start an engine. Network probing and a bundled engine are not implemented. Build and check the workspace with `cargo test --workspace` and `cargo clippy --workspace --all-targets -- -D warnings`. Do not download executables from unofficial sources claiming to be ZapretA.
 
 ## Security and trust
 

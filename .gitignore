@@ -39,3 +39,8 @@ Desktop.ini
 *.exe
 *.dll
 *.sys
+*.lib
+*.a
+*.obj
+*.o
+*.pdb
