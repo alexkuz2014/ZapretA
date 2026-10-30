@@ -1,0 +1,41 @@
+# Rust build output
+/target/
+**/target/
+
+# Local configuration, credentials, and private keys
+.env
+.env.*
+!.env.example
+*.pem
+*.p12
+*.pfx
+*.key
+*.jks
+secrets.*
+credentials.*
+
+# Local/editor/OS state
+.DS_Store
+Thumbs.db
+Desktop.ini
+.vscode/
+.idea/
+*.swp
+*.swo
+*.bak
+*.tmp
+*.log
+
+# Downloaded archives and generated packages
+*.zip
+*.7z
+*.rar
+*.tar
+*.tar.gz
+*.msi
+
+# Executables and drivers must be reviewed and hash-pinned before inclusion.
+# Use `git add -f <path>` only after confirming provenance, license, and SHA-256.
+*.exe
+*.dll
+*.sys
