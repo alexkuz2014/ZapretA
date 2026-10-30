@@ -1,47 +1,45 @@
 # ZapretA
 
-**ZapretA** — планируемая portable‑утилита для Windows 10/11 x64 на Rust. Цель проекта — автоматически диагностировать доступность YouTube, подбирать и проверять сетевую стратегию, затем показывать её состояние в системном трее.
+[English](README.md) | [Русский](README_RU.md)
 
-Проект находится на этапе исследования и проектирования. Приложение ещё не реализовано: готового `.exe`, автоматического обхода, трея и механизма деплоя пока нет.
+**Automatically diagnose and improve access to websites affected by network filtering.** ZapretA is a planned portable Windows application written in Rust. It will test network connectivity, try a verified traffic-handling strategy, and report whether the connection improves.
 
-## Планируемые возможности
+> **Project status: research and architecture.** The application is not implemented yet. There is no executable, installer, automatic traffic handling, or release build at this time.
 
-- Проверка DNS, TCP/TLS, QUIC и загрузки небольшого фрагмента видео с контрольными сетевыми проверками.
-- Последовательная проверка стратегий с остановкой предыдущего сетевого движка перед запуском следующего.
-- Кэширование проверенной стратегии и повторная проверка её работоспособности.
-- Отображение состояния в трее и диагностика типичных ошибок Windows и сети.
-- Локальная обработка трафика без проксирования через сторонние серверы и без телеметрии.
+## What ZapretA aims to do
 
-Это цели проекта, а не подтверждённые возможности текущей версии.
+Some networks interfere with connections to particular websites. The cause can vary: a DNS response may be altered, a TLS connection may be interrupted, or traffic may be slowed after it starts. A basic “can I connect to this address?” check cannot reliably tell these cases apart.
 
-## Архитектура
+ZapretA is intended to run a small set of checks, compare the results with a known reachable control site, and test supported strategies one at a time. If a strategy passes the checks, the app will keep it active and show its status in the Windows system tray. It should avoid sending traffic through third-party proxy servers.
 
-Для MVP рассматривается Rust‑оркестратор вокруг закреплённого и проверяемого `winws.exe`/WinDivert. Собственный Rust‑движок может быть исследован позднее. Перед поставкой любых бинарных компонентов нужно проверить их происхождение, лицензии и SHA‑256.
+These are project goals, not features available today. Results will depend on the network, Windows security settings, and the specific filtering behavior in use.
 
-Архитектурный документ содержит модель стратегий, сравнение вариантов движка, ограничения Windows, подход к диагностике и список открытых вопросов:
+## Project documents
 
-- [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)
-- [docs/RESEARCH.md](docs/RESEARCH.md)
-- [planzapret.md](planzapret.md)
+- [Architecture proposal](docs/ARCHITECTURE.md) — strategy model, engine options, Windows constraints, and open questions.
+- [Research notes](docs/RESEARCH.md) — reviewed sources and items that still need verification.
+- [Project plan](planzapret.md) — phased scope and acceptance goals.
 
-## Состояние проекта
+## Development status
 
-- [x] Исследовательский этап и черновик архитектуры.
-- [ ] Утверждение архитектуры.
-- [ ] Каркас Rust workspace и ядро.
-- [ ] Автоподбор стратегий и диагностика.
-- [ ] Безопасная упаковка, проверка бинарников и GitHub Actions.
-- [ ] Проверки на поддерживаемых версиях Windows.
+- [x] Initial research and architecture proposal.
+- [ ] Approve the architecture and privilege model.
+- [ ] Build the Rust workspace and core modules.
+- [ ] Implement network checks and sequential strategy selection.
+- [ ] Add tray status, safe cleanup, and diagnostics.
+- [ ] Set up Windows CI and publish a verified release.
 
-## Сборка и запуск
+## Build and run
 
-Сборка и запуск пока не поддерживаются: исходный код приложения и `Cargo.toml` ещё не созданы. Не скачивайте и не запускайте сторонние сборки под именем этого проекта.
+There is no application source code or `Cargo.toml` yet, so the project cannot currently be built or run. Do not download executables from unofficial sources claiming to be ZapretA.
 
-## Разработка
+## Security and trust
 
-Целевая платформа — Windows 10/11 x64. Перед реализацией требуется утвердить архитектуру, определить модель повышения привилегий, закрепить конкретные upstream‑версии и проверить лицензии и подписи компонентов. CI и публикация GitHub Releases будут настроены вместе с появлением собираемого приложения.
+The planned approach may use a Windows packet-filtering driver. Such a component needs elevated privileges and must be verified carefully. Before any binary is distributed, the project must document its source, license, version, and SHA-256 checksum. The app is planned to modify traffic locally; it is not intended to route traffic through a remote VPN or proxy.
 
-## Лицензия
+## License
 
-Лицензия проекта ещё не выбрана. Сторонние компоненты будут сопровождаться сведениями об их лицензиях и происхождении.
+The project license has not been selected yet. Third-party components will retain their own license and attribution requirements.
+
+---
 
