@@ -93,19 +93,25 @@ impl VerifiedEngine {
             .unwrap_or_else(|| Path::new("."));
         #[cfg(target_os = "windows")]
         let job = create_kill_on_close_job()?;
-        let mut child = Command::new(&self.executable)
+        let mut command = Command::new(&self.executable);
+        command
             .args(args)
             .current_dir(parent)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .map_err(|error| {
-                EngineError(format!(
-                    "cannot start verified engine {}: {error}",
-                    self.executable.display()
-                ))
-            })?;
+            .stderr(Stdio::null());
+        #[cfg(target_os = "windows")]
+        {
+            use std::os::windows::process::CommandExt;
+            use windows_sys::Win32::System::Threading::CREATE_SUSPENDED;
+            command.creation_flags(CREATE_SUSPENDED);
+        }
+        let mut child = command.spawn().map_err(|error| {
+            EngineError(format!(
+                "cannot start verified engine {}: {error}",
+                self.executable.display()
+            ))
+        })?;
         #[cfg(target_os = "windows")]
         {
             use std::os::windows::io::AsRawHandle;
@@ -120,6 +126,11 @@ impl VerifiedEngine {
                     "cannot assign engine to cleanup job: {error}"
                 )));
             }
+            if let Err(error) = resume_primary_thread(child.id()) {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(error);
+            }
         }
         Ok(EngineProcess {
             child: Some(child),
@@ -127,6 +138,73 @@ impl VerifiedEngine {
             _job: Some(job),
         })
     }
+}
+
+/// The process is created suspended, so its primary thread is the only thread
+/// owned by it when captured. The Job Object assignment must happen first.
+#[cfg(target_os = "windows")]
+fn resume_primary_thread(process_id: u32) -> Result<(), EngineError> {
+    use windows_sys::Win32::{
+        Foundation::{CloseHandle, INVALID_HANDLE_VALUE},
+        System::{
+            Diagnostics::ToolHelp::{
+                CreateToolhelp32Snapshot, TH32CS_SNAPTHREAD, THREADENTRY32, Thread32First,
+                Thread32Next,
+            },
+            Threading::{OpenThread, ResumeThread, THREAD_SUSPEND_RESUME},
+        },
+    };
+
+    // SAFETY: snapshot is an owned kernel handle closed below.
+    let snapshot = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0) };
+    if snapshot == INVALID_HANDLE_VALUE || snapshot.is_null() {
+        return Err(EngineError(format!(
+            "cannot enumerate suspended engine thread: {}",
+            io::Error::last_os_error()
+        )));
+    }
+    struct SnapshotHandle(windows_sys::Win32::Foundation::HANDLE);
+    impl Drop for SnapshotHandle {
+        fn drop(&mut self) {
+            // SAFETY: this handle is owned by SnapshotHandle.
+            unsafe { CloseHandle(self.0) };
+        }
+    }
+    let _snapshot = SnapshotHandle(snapshot);
+    let mut entry = THREADENTRY32 {
+        dwSize: std::mem::size_of::<THREADENTRY32>() as u32,
+        ..Default::default()
+    };
+    // SAFETY: entry points to a correctly sized writable THREADENTRY32.
+    let mut has_entry = unsafe { Thread32First(snapshot, &mut entry) } != 0;
+    while has_entry {
+        if entry.th32OwnerProcessID == process_id {
+            // SAFETY: thread id came from the current system thread snapshot.
+            let thread = unsafe { OpenThread(THREAD_SUSPEND_RESUME, 0, entry.th32ThreadID) };
+            if thread.is_null() {
+                return Err(EngineError(format!(
+                    "cannot open suspended engine thread: {}",
+                    io::Error::last_os_error()
+                )));
+            }
+            // SAFETY: thread is a valid handle opened with THREAD_SUSPEND_RESUME.
+            let previous_suspend_count = unsafe { ResumeThread(thread) };
+            // SAFETY: thread handle is owned here.
+            unsafe { CloseHandle(thread) };
+            if previous_suspend_count == u32::MAX {
+                return Err(EngineError(format!(
+                    "cannot resume engine thread: {}",
+                    io::Error::last_os_error()
+                )));
+            }
+            return Ok(());
+        }
+        // SAFETY: entry remains a correctly sized writable THREADENTRY32.
+        has_entry = unsafe { Thread32Next(snapshot, &mut entry) } != 0;
+    }
+    Err(EngineError(format!(
+        "cannot find primary thread for suspended engine process {process_id}"
+    )))
 }
 
 /// Dropping or explicitly stopping this guard terminates and reaps the child.

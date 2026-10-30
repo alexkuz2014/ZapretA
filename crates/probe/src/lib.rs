@@ -74,44 +74,54 @@ impl DnsFamilyResult {
 }
 
 pub fn dns_baseline_signal(dns: &DnsBaseline) -> Observation<ProbeSignal> {
-    let families = [&dns.system_a, &dns.system_aaaa, &dns.doh_a, &dns.doh_aaaa];
-    if families
-        .iter()
-        .any(|family| family.status == CheckStatus::NotRun)
-    {
-        return Observation::Unknown;
+    let pairs = [
+        (&dns.system_a, &dns.doh_a),
+        (&dns.system_aaaa, &dns.doh_aaaa),
+    ];
+    let mut has_comparable_family = false;
+    let mut has_unknown_family = false;
+    let mut has_special_answer = false;
+    for (system, doh) in pairs {
+        if system.status != CheckStatus::Passed || doh.status != CheckStatus::Passed {
+            has_unknown_family = true;
+            continue;
+        }
+        if matches!(
+            system.address_signal,
+            Observation::Known(AddressSignal::Empty)
+        ) || matches!(doh.address_signal, Observation::Known(AddressSignal::Empty))
+        {
+            // Empty is ambiguous without explicit DNS RCODE/NODATA semantics.
+            has_unknown_family = true;
+            continue;
+        }
+        has_comparable_family = true;
+        if normalized(&system.addresses) != normalized(&doh.addresses) {
+            return Observation::Known(ProbeSignal::PossibleDnsDivergence);
+        }
+        has_special_answer |= is_special(system.address_signal) || is_special(doh.address_signal);
     }
-    if families
-        .iter()
-        .any(|family| family.address_signal == Observation::Known(AddressSignal::Empty))
-    {
-        return Observation::Unknown;
-    }
-    if families.iter().any(|family| {
-        matches!(
-            family.address_signal,
-            Observation::Known(
-                AddressSignal::Unspecified
-                    | AddressSignal::Empty
-                    | AddressSignal::PrivateOrLoopback
-            )
-        )
-    }) {
-        return Observation::Known(ProbeSignal::PossibleDnsDivergence);
-    }
-    let a_comparable =
-        dns.system_a.status == CheckStatus::Passed && dns.doh_a.status == CheckStatus::Passed;
-    let aaaa_comparable =
-        dns.system_aaaa.status == CheckStatus::Passed && dns.doh_aaaa.status == CheckStatus::Passed;
-    if (a_comparable && dns.system_a.addresses != dns.doh_a.addresses)
-        || (aaaa_comparable && dns.system_aaaa.addresses != dns.doh_aaaa.addresses)
-    {
-        Observation::Known(ProbeSignal::PossibleDnsDivergence)
-    } else if a_comparable || aaaa_comparable {
-        Observation::Known(ProbeSignal::NoObservedFailure)
-    } else {
+    if has_special_answer {
+        Observation::Known(ProbeSignal::PossibleDnsSinkholeAnswer)
+    } else if has_unknown_family || !has_comparable_family {
         Observation::Unknown
+    } else {
+        Observation::Known(ProbeSignal::NoObservedFailure)
     }
+}
+
+fn normalized(addresses: &[std::net::IpAddr]) -> Vec<std::net::IpAddr> {
+    let mut result = addresses.to_vec();
+    result.sort_unstable();
+    result.dedup();
+    result
+}
+
+fn is_special(signal: Observation<AddressSignal>) -> bool {
+    matches!(
+        signal,
+        Observation::Known(AddressSignal::Unspecified | AddressSignal::PrivateOrLoopback)
+    )
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -127,6 +137,7 @@ pub struct EndpointResult {
 pub enum ProbeSignal {
     NoObservedFailure,
     PossibleDnsDivergence,
+    PossibleDnsSinkholeAnswer,
     PossibleTcpInterference,
     PossibleTlsInterference,
     PossibleContentThrottlingOrFailure,
@@ -303,5 +314,56 @@ mod tests {
             doh_provider: Observation::Known("test".into()),
         };
         assert_eq!(dns_baseline_signal(&dns), Observation::Unknown);
+    }
+
+    #[test]
+    fn matching_special_addresses_are_sinkhole_signals_not_dns_divergence() {
+        let private =
+            DnsFamilyResult::from_result(CheckStatus::Passed, vec!["10.0.0.8".parse().unwrap()]);
+        let no_aaaa = DnsFamilyResult::from_result(CheckStatus::NotRun, vec![]);
+        let dns = DnsBaseline {
+            system_a: private.clone(),
+            system_aaaa: no_aaaa.clone(),
+            doh_a: private,
+            doh_aaaa: no_aaaa,
+            doh_provider: Observation::Known("mock".into()),
+        };
+        assert_eq!(
+            dns_baseline_signal(&dns),
+            Observation::Known(ProbeSignal::PossibleDnsSinkholeAnswer)
+        );
+    }
+
+    #[test]
+    fn reordered_dns_sets_are_equal_when_both_families_were_queried() {
+        let system = DnsFamilyResult::from_result(
+            CheckStatus::Passed,
+            vec![
+                "203.0.113.2".parse().unwrap(),
+                "203.0.113.1".parse().unwrap(),
+            ],
+        );
+        let doh = DnsFamilyResult::from_result(
+            CheckStatus::Passed,
+            vec![
+                "203.0.113.1".parse().unwrap(),
+                "203.0.113.2".parse().unwrap(),
+            ],
+        );
+        let system_aaaa =
+            DnsFamilyResult::from_result(CheckStatus::Passed, vec!["2001:db8::1".parse().unwrap()]);
+        let doh_aaaa =
+            DnsFamilyResult::from_result(CheckStatus::Passed, vec!["2001:db8::1".parse().unwrap()]);
+        let dns = DnsBaseline {
+            system_a: system,
+            system_aaaa,
+            doh_a: doh,
+            doh_aaaa,
+            doh_provider: Observation::Known("mock".into()),
+        };
+        assert_eq!(
+            dns_baseline_signal(&dns),
+            Observation::Known(ProbeSignal::NoObservedFailure)
+        );
     }
 }

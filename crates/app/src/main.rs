@@ -135,13 +135,20 @@ async fn diagnose() -> ExitCode {
     }
     if let Some((system, doh)) = target_dns {
         let split = |resolution: &zapreta_net::DnsResolution, is_v4: bool| {
-            let addresses = resolution
+            let addresses: Vec<std::net::IpAddr> = resolution
                 .addresses
                 .iter()
                 .copied()
                 .filter(|ip| ip.is_ipv4() == is_v4)
                 .collect();
-            DnsFamilyResult::from_result(CheckStatus::Passed, addresses)
+            let status = if addresses.is_empty() {
+                // `system()` performs an untyped lookup. Absence in its combined
+                // result does not prove a successful family-specific NODATA answer.
+                CheckStatus::NotRun
+            } else {
+                CheckStatus::Passed
+            };
+            DnsFamilyResult::from_result(status, addresses)
         };
         let dns = DnsBaseline {
             system_a: split(&system, true),
