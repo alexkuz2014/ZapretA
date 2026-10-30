@@ -1,4 +1,7 @@
-//! Network access policy primitives. No requests or downloads are implemented yet.
+//! DNS resolution and bounded HTTPS probes for the diagnostic CLI.
+//!
+//! These clients make real network requests when called. Keep them out of
+//! deterministic tests; unit tests use local mock servers instead.
 
 use serde::Deserialize;
 use std::{borrow::Cow, fmt, net::IpAddr, time::Duration};
