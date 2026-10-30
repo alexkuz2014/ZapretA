@@ -27,9 +27,12 @@ cargo test --workspace
 cargo build --workspace
 cargo run -p zapreta -- --version
 cargo run -p zapreta -- --validate-catalog catalog/format-example.toml
+cargo run -p zapreta -- --validate-source-catalog catalog/flowseal/flowseal-general-default.toml
 ```
 
 `--diagnose` выполняет настоящие DNS/HTTPS запросы к документированному в README списку доменов. Не используй её как unit-тест или CI smoke test. В автоматизированной проверке сеть нужна только инструментам аудита, которые загружают advisory database и сведения Cargo registry.
+
+Проверка `--validate-source-catalog` читает один из 22 снимков исходных аргументов Flowseal и явно помечает его как неисполняемый. Golden-тесты извлекают нормализованные аргументы из MIT-лицензированных `.bat` fixtures и сравнивают с TOML. Это пока не проверяет генератор `StrategyCatalog::strategy_argv` и не означает, что конфигурации можно запускать.
 
 ## Dependency policy checks
 

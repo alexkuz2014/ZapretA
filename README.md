@@ -35,6 +35,8 @@ The current `--diagnose` command directly queries the configured system DNS reso
 
 The CLI can validate the example catalog and run the initial network diagnostic with `cargo run -p zapreta -- --diagnose`. The catalog is only a schema demonstration and cannot start an engine. The diagnostic contacts `dns.google`, `www.youtube.com`, and `example.com`; it does not perform traffic handling or prove that a site works in a browser. Build and check the workspace with `cargo test --workspace` and `cargo clippy --workspace --all-targets -- -D warnings`. Do not download executables from unofficial sources claiming to be ZapretA.
 
+The repository also contains 22 pinned Flowseal source snapshots under [catalog/flowseal](catalog/flowseal/README.md). They preserve upstream arguments for review and golden tests; they are not runnable strategies and are not passed to an engine.
+
 See [Development setup](docs/DEV_SETUP.md) for the pinned Rust toolchain, MSVC requirements, CI checks, and artifact details. [Windows CI passed](https://github.com/alexkuz2014/ZapretA/actions/runs/41042507801) and uploaded a temporary Windows executable with SHA-256 manifest; this is not an official release or signed binary.
 
 ## Security and trust

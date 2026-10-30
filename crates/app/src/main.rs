@@ -15,10 +15,19 @@ async fn main() -> ExitCode {
             };
             validate_catalog(PathBuf::from(path))
         }
+        Some(arg) if arg == "--validate-source-catalog" => {
+            let Some(path) = args.next() else {
+                eprintln!("Usage: zapreta --validate-source-catalog <snapshot.toml>");
+                return ExitCode::from(2);
+            };
+            validate_source_catalog(PathBuf::from(path))
+        }
         Some(arg) if arg == "--diagnose" => diagnose().await,
         _ => {
             println!("ZapretA — research build. Network engine is not configured yet.");
-            println!("Use --version, --validate-catalog <catalog.toml>, or --diagnose.");
+            println!(
+                "Use --version, --validate-catalog <catalog.toml>, --validate-source-catalog <snapshot.toml>, or --diagnose."
+            );
             ExitCode::SUCCESS
         }
     }
@@ -139,6 +148,29 @@ fn validate_catalog(path: PathBuf) -> ExitCode {
         }
         Err(error) => {
             eprintln!("Catalog error: {error}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+fn validate_source_catalog(path: PathBuf) -> ExitCode {
+    match std::fs::read_to_string(&path)
+        .map_err(|error| format!("cannot read {}: {error}", path.display()))
+        .and_then(|input| {
+            zapreta_core::SourceStrategySnapshot::parse_toml(&input)
+                .map_err(|error| error.to_string())
+        }) {
+        Ok(snapshot) => {
+            println!(
+                "Valid source snapshot (not runnable): {}; {} argv tokens; source {}",
+                snapshot.profile_name,
+                snapshot.argv.len(),
+                snapshot.source_commit
+            );
+            ExitCode::SUCCESS
+        }
+        Err(error) => {
+            eprintln!("Source snapshot error: {error}");
             ExitCode::FAILURE
         }
     }

@@ -1,7 +1,192 @@
 //! Validated strategy catalog and probe scoring primitives.
 
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::{collections::BTreeSet, path::Path};
+
+const FLOWSEAL_REPOSITORY: &str = "https://github.com/Flowseal/zapret-discord-youtube";
+const FLOWSEAL_COMMIT: &str = "176f56dc3f11ce5915c26abcdde903f93d835b64";
+const REFERENCE_ARGUMENTS: &[&str] = &[
+    "--wf-tcp",
+    "--wf-udp",
+    "--filter-tcp",
+    "--filter-udp",
+    "--filter-l3",
+    "--filter-l7",
+    "--hostlist",
+    "--hostlist-exclude",
+    "--hostlist-domains",
+    "--hostlist-exclude-domains",
+    "--ipset",
+    "--ipset-exclude",
+    "--ip-id",
+    "--dpi-desync",
+    "--dpi-desync-repeats",
+    "--dpi-desync-any-protocol",
+    "--dpi-desync-cutoff",
+    "--dpi-desync-fooling",
+    "--dpi-desync-badseq-increment",
+    "--dpi-desync-split-pos",
+    "--dpi-desync-split-seqovl",
+    "--dpi-desync-split-seqovl-pattern",
+    "--dpi-desync-fakedsplit-pattern",
+    "--dpi-desync-hostfakesplit-mod",
+    "--dpi-desync-fake-tls-mod",
+    "--dpi-desync-fake-tls",
+    "--dpi-desync-fake-http",
+    "--dpi-desync-fake-quic",
+    "--dpi-desync-fake-discord",
+    "--dpi-desync-fake-stun",
+    "--dpi-desync-fake-unknown",
+    "--dpi-desync-fake-unknown-udp",
+];
+
+/// A source snapshot preserves upstream command-line tokens for audit and golden tests.
+/// It is intentionally distinct from executable `Strategy`: these arguments must not
+/// be passed to an engine until they have been migrated to the validated typed model.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SourceStrategySnapshot {
+    pub schema_version: u32,
+    pub source_repository: String,
+    pub source_commit: String,
+    pub profile_id: String,
+    pub profile_name: String,
+    pub source_file: String,
+    pub source_sha256: String,
+    pub service_sha256: String,
+    pub game_filter_tcp_default: String,
+    pub game_filter_udp_default: String,
+    pub argv: Vec<String>,
+}
+
+impl SourceStrategySnapshot {
+    pub fn parse_toml(input: &str) -> Result<Self, CatalogError> {
+        let snapshot: Self = toml::from_str(input)
+            .map_err(|error| CatalogError(format!("invalid source snapshot: {error}")))?;
+        snapshot.validate()?;
+        Ok(snapshot)
+    }
+
+    pub fn validate(&self) -> Result<(), CatalogError> {
+        if self.schema_version != 1 {
+            return Err(CatalogError("unsupported source snapshot schema".into()));
+        }
+        if self.source_repository != FLOWSEAL_REPOSITORY {
+            return Err(CatalogError("unexpected source repository".into()));
+        }
+        if !self.profile_name.starts_with("general") || !self.profile_name.ends_with(".bat") {
+            return Err(CatalogError(
+                "profile_name must identify a general*.bat profile".into(),
+            ));
+        }
+        if self.source_commit != FLOWSEAL_COMMIT {
+            return Err(CatalogError(
+                "source_commit must match the reviewed Flowseal snapshot".into(),
+            ));
+        }
+        if !self.profile_id.starts_with("flowseal-general-")
+            || !self
+                .profile_id
+                .bytes()
+                .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+        {
+            return Err(CatalogError("invalid Flowseal profile_id".into()));
+        }
+        validate_relative_path(&self.source_file)?;
+        if self.source_sha256.len() != 64
+            || !self
+                .source_sha256
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit())
+        {
+            return Err(CatalogError(
+                "source_sha256 must be a 64-character hex digest".into(),
+            ));
+        }
+        if self.service_sha256.len() != 64
+            || !self
+                .service_sha256
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit())
+        {
+            return Err(CatalogError(
+                "service_sha256 must be a 64-character hex digest".into(),
+            ));
+        }
+        for value in [&self.game_filter_tcp_default, &self.game_filter_udp_default] {
+            if value != "12" {
+                return Err(CatalogError(
+                    "only the disabled-by-default Game Filter port 12 snapshot is supported".into(),
+                ));
+            }
+        }
+        if self.argv.is_empty() || self.argv.len() > 256 {
+            return Err(CatalogError(
+                "source argv must contain 1 to 256 tokens".into(),
+            ));
+        }
+        for argument in &self.argv {
+            validate_reference_argument(argument)?;
+        }
+        Ok(())
+    }
+
+    pub fn normalized_source_file_hash(&self, bytes: &[u8]) -> String {
+        format!("{:x}", Sha256::digest(bytes))
+    }
+}
+
+fn validate_reference_argument(argument: &str) -> Result<(), CatalogError> {
+    if argument == "--new" {
+        return Ok(());
+    }
+    let Some((flag, value)) = argument.split_once('=') else {
+        return Err(CatalogError(format!(
+            "source argv token has no value: {argument}"
+        )));
+    };
+    if !REFERENCE_ARGUMENTS.contains(&flag) {
+        return Err(CatalogError(format!("unsupported source argument: {flag}")));
+    }
+    if value.is_empty()
+        || value.len() > 2048
+        || value
+            .chars()
+            .any(|ch| matches!(ch, '\0' | '\r' | '\n' | '"' | '\''))
+        || value.contains('%')
+    {
+        return Err(CatalogError(format!(
+            "invalid source argument value: {argument}"
+        )));
+    }
+    let path_option = matches!(
+        flag,
+        "--hostlist"
+            | "--hostlist-exclude"
+            | "--ipset"
+            | "--ipset-exclude"
+            | "--dpi-desync-split-seqovl-pattern"
+    );
+    let fake_payload = matches!(
+        flag,
+        "--dpi-desync-fake-tls"
+            | "--dpi-desync-fake-http"
+            | "--dpi-desync-fake-quic"
+            | "--dpi-desync-fake-discord"
+            | "--dpi-desync-fake-stun"
+            | "--dpi-desync-fake-unknown"
+            | "--dpi-desync-fake-unknown-udp"
+    );
+    if path_option || (fake_payload && (value.contains('/') || value.contains('\\'))) {
+        validate_relative_path(value)?;
+    } else if value.contains(':') || value.contains('\\') {
+        return Err(CatalogError(format!(
+            "unsafe source argument value: {argument}"
+        )));
+    }
+    Ok(())
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -430,5 +615,136 @@ hostlists = ["lists/general.txt"]
     fn rejects_invalid_port_ranges() {
         let malformed = CATALOG.replace("2053-2054", "2054-2053");
         assert!(StrategyCatalog::parse_toml(&malformed).is_err());
+    }
+
+    #[test]
+    fn source_snapshot_rejects_unapproved_flags_and_unsafe_paths() {
+        let mut snapshot = SourceStrategySnapshot {
+            schema_version: 1,
+            source_repository: FLOWSEAL_REPOSITORY.into(),
+            source_commit: FLOWSEAL_COMMIT.into(),
+            profile_id: "flowseal-general-default".into(),
+            profile_name: "general.bat".into(),
+            source_file: "tests/fixtures/flowseal/general.bat".into(),
+            source_sha256: "b".repeat(64),
+            service_sha256: "c".repeat(64),
+            game_filter_tcp_default: "12".into(),
+            game_filter_udp_default: "12".into(),
+            argv: vec!["--wf-tcp=80,443".into()],
+        };
+        assert!(snapshot.validate().is_ok());
+        snapshot.argv[0] = "--unapproved=anything".into();
+        assert!(snapshot.validate().is_err());
+        snapshot.argv[0] = "--hostlist=../outside.txt".into();
+        assert!(snapshot.validate().is_err());
+        snapshot.argv[0] = "--wf-tcp=C:\\outside".into();
+        assert!(snapshot.validate().is_err());
+    }
+
+    #[test]
+    fn all_flowseal_reference_argv_match_pinned_batch_files() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let catalog_dir = root.join("catalog/flowseal");
+        let service_path = root.join("tests/fixtures/flowseal/service.bat");
+        let service_bytes = std::fs::read(&service_path).unwrap();
+        let service_text = String::from_utf8_lossy(&service_bytes);
+        assert!(service_text.contains("set \"GameFilterMode=disabled\""));
+        assert!(service_text.contains("set \"GameFilterTCP=12\""));
+        assert!(service_text.contains("set \"GameFilterUDP=12\""));
+        assert!(service_text.contains("if not exist \"%gameFlagFile%\" exit /b"));
+
+        let mut paths: Vec<_> = std::fs::read_dir(catalog_dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .filter(|path| {
+                path.extension()
+                    .is_some_and(|extension| extension == "toml")
+            })
+            .collect();
+        paths.sort();
+        assert_eq!(paths.len(), 22, "expected all 22 general*.bat profiles");
+
+        let mut profile_ids = BTreeSet::new();
+        for path in paths {
+            let text = std::fs::read_to_string(&path).unwrap();
+            let snapshot = SourceStrategySnapshot::parse_toml(&text).unwrap();
+            assert!(profile_ids.insert(snapshot.profile_id.clone()));
+            let fixture_path = root.join(&snapshot.source_file);
+            let fixture_bytes = std::fs::read(&fixture_path).unwrap();
+            assert_eq!(
+                snapshot.normalized_source_file_hash(&fixture_bytes),
+                snapshot.source_sha256,
+                "source hash mismatch for {}",
+                snapshot.profile_name
+            );
+            assert_eq!(
+                fixture_path.file_name().unwrap().to_string_lossy(),
+                snapshot.profile_name,
+                "source filename mismatch for {}",
+                snapshot.profile_id
+            );
+            assert_eq!(
+                format!("{:x}", Sha256::digest(&service_bytes)),
+                snapshot.service_sha256,
+                "service.bat hash mismatch for {}",
+                snapshot.profile_name
+            );
+            let actual = extract_batch_argv(&String::from_utf8_lossy(&fixture_bytes));
+            assert_eq!(
+                snapshot.argv, actual,
+                "argv mismatch for {}",
+                snapshot.profile_name
+            );
+        }
+    }
+
+    fn extract_batch_argv(source: &str) -> Vec<String> {
+        let lines: Vec<_> = source.lines().collect();
+        let marker = "\"%BIN%winws.exe\"";
+        let start = lines
+            .iter()
+            .position(|line| line.contains(marker))
+            .expect("profile must start winws.exe");
+        let mut command = lines[start][lines[start].find(marker).unwrap() + marker.len()..]
+            .trim()
+            .to_string();
+        let mut index = start;
+        loop {
+            let trimmed = command.trim_end();
+            if !trimmed.ends_with('^') {
+                break;
+            }
+            command = trimmed[..trimmed.len() - 1].to_string();
+            index += 1;
+            command.push(' ');
+            command.push_str(lines[index].trim());
+        }
+
+        let mut args = Vec::new();
+        let mut token = String::new();
+        let mut quoted = false;
+        for ch in command.chars() {
+            match ch {
+                '"' => quoted = !quoted,
+                ch if ch.is_whitespace() && !quoted => {
+                    if !token.is_empty() {
+                        args.push(std::mem::take(&mut token));
+                    }
+                }
+                _ => token.push(ch),
+            }
+        }
+        if !token.is_empty() {
+            args.push(token);
+        }
+        assert!(!quoted, "profile command contains an unmatched quote");
+        args.into_iter()
+            .map(|arg| {
+                arg.replace("%BIN%", "bin/")
+                    .replace("%LISTS%", "lists/")
+                    .replace("%GameFilterTCP%", "12")
+                    .replace("%GameFilterUDP%", "12")
+            })
+            .collect()
     }
 }
