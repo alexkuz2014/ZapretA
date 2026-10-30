@@ -101,12 +101,12 @@ Score: жёсткий gate по контрольной цели и HTTP/TLS за
 
 - `zapreta-core`: строгая TOML-модель с неизвестными полями запрещёнными; проверка версии схемы, ID, портов, относительных путей, SHA-256 payload; сборка argv по отдельным filter-блокам и базовый жёсткий gate/score.
 - `zapreta-engine`: потоковое SHA-256 файла перед запуском, argv передаётся через `Command` без shell, явный stop/wait и Windows Job Object для cleanup при аварийном выходе.
-- `zapreta-probe`: типы результатов и осторожная классификация сигналов; это пока не реальные сетевые запросы и не доказательство DPI.
-- `zapreta-net`: проверка DNS-имён назначения; HTTP/DoH-запросы и загрузки ещё не реализованы.
-- `zapreta` CLI: `--version`, `--validate-catalog <path>`.
+- `zapreta-probe`: типы результатов и осторожная классификация сигналов; сбор с реальными сетевыми проверками ещё не связан.
+- `zapreta-net`: системное DNS-разрешение, Google JSON DoH без EDNS client subnet и прямые HTTPS GET без proxy/redirect, с таймаутами и ограничением тела ответа. Списки адресов пока сравниваются буквально; CDN-ротация и неполный IPv6 у одного резолвера могут объяснить различия, поэтому они не считаются признаком подмены.
+- `zapreta` CLI: `--version`, `--validate-catalog <path>`, `--diagnose`. Последняя команда обращается к `dns.google`, `www.youtube.com`, `example.com`; не меняет настройки и не запускает движок.
 - `catalog/format-example.toml` — демонстрация схемы, не исполняемый профиль; версия движка намеренно не закреплена.
 
-Проверено на Windows x64 через target `x86_64-pc-windows-gnullvm`: `cargo test --workspace` (13 тестов) и `cargo clippy --workspace --all-targets -- -D warnings` прошли; отдельно запущены `--version` и проверка примера каталога. MSVC target локально пока не проверен из-за отсутствующего `dbghelp.lib`; GitHub CI для штатного MSVC toolchain ещё не настроен.
+Проверено на Windows x64 через target `x86_64-pc-windows-gnullvm`: 15 unit-тестов, `cargo clippy --workspace --all-targets -- -D warnings`, `--version` и пример каталога прошли. `--diagnose` локально выполнил DNS и HTTPS запросы: YouTube вернул HTTP 204, `example.com` — HTTP 200; system DNS и DoH различались по наличию AAAA в системном ответе, что не доказывает подмену. MSVC target локально пока не проверен из-за отсутствующего `dbghelp.lib`; GitHub CI для штатного MSVC toolchain ещё не настроен.
 
 ## Открытые вопросы до этапа 2
 
@@ -120,6 +120,8 @@ Score: жёсткий gate по контрольной цели и HTTP/TLS за
 
 ## Источники
 
+- Google Public DNS JSON API: https://developers.google.com/speed/public-dns/docs/doh/json — документирует GET/JSON интерфейс и параметр `edns_client_subnet`; используется для ручной диагностической проверки, не как единственный источник истины.
+- reqwest: https://docs.rs/reqwest/latest/reqwest/ — HTTPS-клиент с rustls, запретом proxy из окружения и отключёнными redirect в диагностическом пути.
 - Flowseal repository, `general*.bat`, `service.bat`, README: https://github.com/Flowseal/zapret-discord-youtube (срез `main`, изучено 2026-10-30). Локально разобраны все 22 `general*.bat`; файлы профилей в таблице.
 - Пример профиля ALT13: https://github.com/Flowseal/zapret-discord-youtube/blob/main/general%20%28ALT13%29.bat
 - Оригинальная документация zapret: https://github.com/bol-van/zapret/blob/master/docs/readme.en.md. README этой ветки сообщает, что zapret 1 EOL и текущая версия — zapret2; детали поведения не переносить на Flowseal `winws` без сверки версии.

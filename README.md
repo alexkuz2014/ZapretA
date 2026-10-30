@@ -4,7 +4,7 @@
 
 **Automatically diagnose and improve access to websites affected by network filtering.** ZapretA is a planned portable Windows application written in Rust. It will test network connectivity, try a verified traffic-handling strategy, and report whether the connection improves.
 
-> **Project status: early development.** The Rust workspace, catalog validation, diagnostic signal types, and verified engine process boundary are in place. There is no bundled engine, active network probe, automatic traffic handling, or release build yet.
+> **Project status: early development.** The Rust workspace, catalog validation, engine process boundary, and an initial manual DNS/HTTPS diagnostic (`--diagnose`) are in place. There is no bundled engine, automatic strategy selection, tray UI, or release build yet.
 
 ## What ZapretA aims to do
 
@@ -12,7 +12,7 @@ Some networks interfere with connections to particular websites. The cause can v
 
 ZapretA is intended to run a small set of checks, compare the results with a known reachable control site, and test supported strategies one at a time. If a strategy passes the checks, the app will keep it active and show its status in the Windows system tray. It should avoid sending traffic through third-party proxy servers.
 
-These are project goals, not features available today. Results will depend on the network, Windows security settings, and the specific filtering behavior in use.
+The current `--diagnose` command directly queries the configured system DNS resolver and `dns.google`, then makes bounded HTTPS requests to `www.youtube.com` and `example.com`. It does not change system settings or start a traffic engine. Different DNS answers are only a signal for further investigation, not proof of tampering. Run it only if you agree to these network requests. Automatic strategy selection and the other goals remain under development.
 
 ## Project documents
 
@@ -25,13 +25,14 @@ These are project goals, not features available today. Results will depend on th
 - [x] Initial research and architecture proposal.
 - [x] Approve and start the Rust workspace architecture.
 - [x] Build the Rust workspace, catalog validator, and engine process boundary.
-- [ ] Implement network checks and sequential strategy selection.
+- [x] Add initial manual system DNS, Google DoH, and HTTPS checks.
+- [ ] Classify probe signals and implement sequential strategy selection.
 - [ ] Add tray status, safe cleanup, and diagnostics.
 - [ ] Set up Windows CI and publish a verified release.
 
 ## Build and run
 
-The current CLI can validate the example catalog. The example is only a schema demonstration and cannot be used to start an engine. Network probing and a bundled engine are not implemented. Build and check the workspace with `cargo test --workspace` and `cargo clippy --workspace --all-targets -- -D warnings`. Do not download executables from unofficial sources claiming to be ZapretA.
+The CLI can validate the example catalog and run the initial network diagnostic with `cargo run -p zapreta -- --diagnose`. The catalog is only a schema demonstration and cannot start an engine. The diagnostic contacts `dns.google`, `www.youtube.com`, and `example.com`; it does not perform traffic handling or prove that a site works in a browser. Build and check the workspace with `cargo test --workspace` and `cargo clippy --workspace --all-targets -- -D warnings`. Do not download executables from unofficial sources claiming to be ZapretA.
 
 ## Security and trust
 
