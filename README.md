@@ -25,7 +25,7 @@ The current `--diagnose` command directly queries the configured system DNS reso
 - [x] Initial research and architecture proposal.
 - [x] Approve and start the Rust workspace architecture.
 - [x] Build the Rust workspace, catalog validator, and engine process boundary.
-- [x] Add initial manual system DNS, Google DoH, and HTTPS checks.
+- [x] Add initial manual system DNS, bootstrapped Google/Cloudflare DoH fallback, and HTTPS checks.
 - [ ] Classify probe signals and implement sequential strategy selection.
 - [ ] Add tray status, safe cleanup, and diagnostics.
 - [x] Add Windows MSVC CI, dependency policy checks, and a checksummed CI artifact.

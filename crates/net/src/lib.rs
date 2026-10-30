@@ -3,7 +3,10 @@
 use serde::Deserialize;
 use std::{fmt, net::IpAddr, time::Duration};
 
+const GOOGLE_DOH_HOST: &str = "dns.google";
+const CLOUDFLARE_DOH_HOST: &str = "cloudflare-dns.com";
 const GOOGLE_DOH_URL: &str = "https://dns.google/resolve";
+const CLOUDFLARE_DOH_URL: &str = "https://cloudflare-dns.com/dns-query";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AllowedHost {
@@ -68,6 +71,8 @@ pub fn validate_hostname(hostname: &str) -> Result<(), HostnameError> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DnsResolution {
     pub addresses: Vec<IpAddr>,
+    /// Provider used (`system`, `Google Public DNS`, or `Cloudflare 1.1.1.1`).
+    pub provider: &'static str,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -82,15 +87,15 @@ impl fmt::Display for NetError {
 impl std::error::Error for NetError {}
 
 #[derive(Debug, Deserialize)]
-struct GoogleDnsResponse {
+struct DnsJsonResponse {
     #[serde(rename = "Status")]
     status: u16,
     #[serde(rename = "Answer", default)]
-    answers: Vec<GoogleDnsAnswer>,
+    answers: Vec<DnsJsonAnswer>,
 }
 
 #[derive(Debug, Deserialize)]
-struct GoogleDnsAnswer {
+struct DnsJsonAnswer {
     #[serde(rename = "type")]
     record_type: u16,
     data: String,
@@ -99,6 +104,29 @@ struct GoogleDnsAnswer {
 pub struct DnsResolver {
     client: reqwest::Client,
 }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct DohProvider {
+    name: &'static str,
+    url: &'static str,
+    accept: &'static str,
+    bootstrap_host: &'static str,
+}
+
+const DOH_PROVIDERS: [DohProvider; 2] = [
+    DohProvider {
+        name: "Google Public DNS",
+        url: GOOGLE_DOH_URL,
+        accept: "application/x-javascript",
+        bootstrap_host: GOOGLE_DOH_HOST,
+    },
+    DohProvider {
+        name: "Cloudflare 1.1.1.1",
+        url: CLOUDFLARE_DOH_URL,
+        accept: "application/dns-json",
+        bootstrap_host: CLOUDFLARE_DOH_HOST,
+    },
+];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HttpsProbeResult {
@@ -188,6 +216,22 @@ impl HttpsProber {
 impl DnsResolver {
     pub fn new(timeout: Duration) -> Result<Self, NetError> {
         let client = reqwest::Client::builder()
+            // Keep the URL hostname for TLS SNI and certificate validation, while
+            // resolving the provider hostname only to its published resolver IPs.
+            .resolve_to_addrs(
+                GOOGLE_DOH_HOST,
+                &[
+                    "8.8.8.8:0".parse().expect("valid bootstrap socket address"),
+                    "8.8.4.4:0".parse().expect("valid bootstrap socket address"),
+                ],
+            )
+            .resolve_to_addrs(
+                CLOUDFLARE_DOH_HOST,
+                &[
+                    "1.1.1.1:0".parse().expect("valid bootstrap socket address"),
+                    "1.0.0.1:0".parse().expect("valid bootstrap socket address"),
+                ],
+            )
             .no_proxy()
             .redirect(reqwest::redirect::Policy::none())
             .timeout(timeout)
@@ -209,50 +253,73 @@ impl DnsResolver {
         if addresses.is_empty() {
             return Err(NetError("system DNS returned no addresses".into()));
         }
-        Ok(DnsResolution { addresses })
+        Ok(DnsResolution {
+            addresses,
+            provider: "system",
+        })
     }
 
-    /// Queries Google's documented JSON DoH API without sending an EDNS client subnet.
-    pub async fn google_doh(&self, hostname: &str) -> Result<DnsResolution, NetError> {
+    /// Queries Google then Cloudflare DoH using pinned resolver IPs as DNS bootstrap.
+    /// The provider hostname remains in the URL, preserving TLS SNI and validation.
+    pub async fn doh(&self, hostname: &str) -> Result<DnsResolution, NetError> {
         validate_hostname(hostname).map_err(|error| NetError(error.to_string()))?;
+        let mut failures = Vec::new();
+        for provider in DOH_PROVIDERS {
+            match self.query_doh_provider(hostname, provider).await {
+                Ok(result) => return Ok(result),
+                Err(error) => failures.push(format!("{}: {error}", provider.name)),
+            }
+        }
+        Err(NetError(format!(
+            "all DoH providers failed ({})",
+            failures.join("; ")
+        )))
+    }
+
+    async fn query_doh_provider(
+        &self,
+        hostname: &str,
+        provider: DohProvider,
+    ) -> Result<DnsResolution, NetError> {
         let mut addresses = Vec::new();
         for record_type in ["A", "AAAA"] {
-            let response = self
+            let mut request = self
                 .client
-                .get(GOOGLE_DOH_URL)
-                .query(&[
-                    ("name", hostname),
-                    ("type", record_type),
-                    ("ct", "application/x-javascript"),
-                    ("edns_client_subnet", "0.0.0.0/0"),
-                ])
+                .get(provider.url)
+                .header(reqwest::header::ACCEPT, provider.accept)
+                .query(&[("name", hostname), ("type", record_type)]);
+            if provider.name == "Google Public DNS" {
+                request = request.query(&[("edns_client_subnet", "0.0.0.0/0")]);
+            }
+            let response = request
                 .send()
                 .await
-                .map_err(|error| NetError(format!("Google DoH request failed: {error}")))?;
+                .map_err(|error| NetError(error.to_string()))?;
             if !response.status().is_success() {
-                return Err(NetError(format!(
-                    "Google DoH returned HTTP {}",
-                    response.status()
-                )));
+                return Err(NetError(format!("HTTP {}", response.status())));
             }
-            let response_text = response.text().await.map_err(|error| {
-                NetError(format!("reading Google DoH response failed: {error}"))
-            })?;
+            let response_text = response
+                .text()
+                .await
+                .map_err(|error| NetError(format!("reading response failed: {error}")))?;
             let wanted_type = if record_type == "A" { 1 } else { 28 };
-            addresses.extend(parse_google_dns_json(&response_text, wanted_type)?);
+            addresses.extend(parse_dns_json(&response_text, wanted_type)?);
         }
         addresses.sort_unstable();
         addresses.dedup();
         if addresses.is_empty() {
-            return Err(NetError("Google DoH returned no A/AAAA addresses".into()));
+            return Err(NetError("provider returned no A/AAAA addresses".into()));
         }
-        Ok(DnsResolution { addresses })
+        Ok(DnsResolution {
+            addresses,
+            provider: provider.name,
+        })
     }
 }
 
-fn parse_google_dns_json(input: &str, wanted_type: u16) -> Result<Vec<IpAddr>, NetError> {
-    let response: GoogleDnsResponse = serde_json::from_str(input)
-        .map_err(|error| NetError(format!("invalid Google DoH JSON: {error}")))?;
+fn parse_dns_json(input: &str, wanted_type: u16) -> Result<Vec<IpAddr>, NetError> {
+    let response: DnsJsonResponse = serde_json::from_str(input)
+        .map_err(|error| NetError(format!("invalid DoH JSON: {error}")))?;
     if response.status != 0 {
         return Err(NetError(format!("DNS status {}", response.status)));
     }
@@ -290,19 +357,32 @@ mod tests {
     fn parses_only_requested_dns_record_type() {
         let json = r#"{"Status":0,"Answer":[{"name":"example.com.","type":1,"TTL":60,"data":"192.0.2.1"},{"name":"example.com.","type":28,"TTL":60,"data":"2001:db8::1"}]}"#;
         assert_eq!(
-            parse_google_dns_json(json, 1).unwrap(),
+            parse_dns_json(json, 1).unwrap(),
             vec!["192.0.2.1".parse::<IpAddr>().unwrap()]
         );
         assert_eq!(
-            parse_google_dns_json(json, 28).unwrap(),
+            parse_dns_json(json, 28).unwrap(),
             vec!["2001:db8::1".parse::<IpAddr>().unwrap()]
         );
     }
 
     #[test]
     fn rejects_dns_errors_and_invalid_addresses() {
-        assert!(parse_google_dns_json(r#"{"Status":3}"#, 1).is_err());
+        assert!(parse_dns_json(r#"{"Status":3}"#, 1).is_err());
         let json = r#"{"Status":0,"Answer":[{"type":1,"data":"not-an-ip"}]}"#;
-        assert!(parse_google_dns_json(json, 1).is_err());
+        assert!(parse_dns_json(json, 1).is_err());
+    }
+
+    #[test]
+    fn doh_providers_have_pinned_bootstrap_hosts_and_ordered_fallback() {
+        assert_eq!(DOH_PROVIDERS[0].name, "Google Public DNS");
+        assert_eq!(DOH_PROVIDERS[1].name, "Cloudflare 1.1.1.1");
+        assert_eq!(DOH_PROVIDERS[0].bootstrap_host, "dns.google");
+        assert_eq!(DOH_PROVIDERS[1].bootstrap_host, "cloudflare-dns.com");
+        assert!(
+            DOH_PROVIDERS
+                .iter()
+                .all(|provider| provider.url.starts_with("https://"))
+        );
     }
 }

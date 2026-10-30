@@ -53,13 +53,15 @@ async fn diagnose() -> ExitCode {
     };
 
     println!("Проверка сети без запуска движка и без изменения трафика.");
-    println!("DNS через систему и Google DoH; HTTPS к YouTube и контрольному example.com.");
+    println!(
+        "DNS через систему и DoH с резервным провайдером; HTTPS к YouTube и контрольному example.com."
+    );
 
     let mut all_passed = true;
     for hostname in ["www.youtube.com", "example.com"] {
         println!("\nDNS: {hostname}");
         let system = resolver.system(hostname).await;
-        let doh = resolver.google_doh(hostname).await;
+        let doh = resolver.doh(hostname).await;
         match (&system, &doh) {
             (Ok(system), Ok(doh)) if system.addresses == doh.addresses => {
                 println!("  Системный DNS и DoH вернули одинаковые адреса.");
@@ -69,7 +71,7 @@ async fn diagnose() -> ExitCode {
                     "  Полные списки различаются. CDN, ротация адресов или разная поддержка IPv4/IPv6 могут объяснить это; само по себе это не указывает на подмену."
                 );
                 println!("  System: {:?}", system.addresses);
-                println!("  DoH:    {:?}", doh.addresses);
+                println!("  DoH ({}): {:?}", doh.provider, doh.addresses);
             }
             (system, doh) => {
                 all_passed = false;

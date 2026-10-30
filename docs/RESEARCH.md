@@ -4,11 +4,13 @@
 
 ## Реализация диагностического сетевого слоя
 
-Первый инкремент этапа 2 реализует ручную baseline-диагностику. Google документирует JSON API `https://dns.google/resolve`, GET-параметры для DNS query и `edns_client_subnet`; проект отправляет `0.0.0.0/0`, чтобы не передавать публичному резолверу клиентскую подсеть в этом поле. Это не гарантирует анонимность запроса: DNS-соединение к `dns.google` и HTTPS-запросы к проверочным целям всё равно видны соответствующим сетевым узлам. DoH hostname сам разрешается обычным системным DNS.
+Первый инкремент этапа 2 реализует ручную baseline-диагностику. Google документирует JSON API `https://dns.google/resolve`; Cloudflare предоставляет совместимый JSON API по `https://cloudflare-dns.com/dns-query`. Клиент пробует Google, затем Cloudflare при любой ошибке первого провайдера. Для обоих hostname заданы опубликованные IPv4 bootstrap IP (Google `8.8.8.8`, `8.8.4.4`; Cloudflare `1.1.1.1`, `1.0.0.1`) через reqwest `resolve_to_addrs`: URL сохраняет hostname для TLS SNI и проверки сертификата, но системный DNS не нужен для разрешения имени самого DoH-провайдера. IP являются настройкой, закреплённой в исходниках; при их изменении нужна проверка официальной документации и обновление тестов. Bootstrap сейчас использует IPv4, поэтому IPv6-only сеть не поддержана.
+
+Google запросы содержат `edns_client_subnet=0.0.0.0/0`, Cloudflare запросы его не отправляют. Ни одна из мер не гарантирует анонимность: сетевые узлы видят соединение с выбранным резолвером, а проверочные цели получают HTTPS запросы. Сетевые integration-тесты с локальным сервером и гарантированное покрытие fallback ещё предстоит добавить; текущие unit-тесты проверяют конфигурацию провайдеров и общий JSON формат без внешней сети.
 
 `reqwest` с rustls используется для прямых HTTPS запросов без proxy из окружения, без redirect и с таймаутом/ограничением чтения тела. Это только HTTP/TLS доступность, не проверка воспроизведения видео. На текущей машине сетевой запуск вернул HTTP 204 для YouTube и HTTP 200 для контрольного `example.com`; DNS-наборы различались наличием IPv6-адресов в DoH. Такие различия могут происходить из-за CDN и поддержки IPv4/IPv6, поэтому не классифицируются как доказанная подмена.
 
-Источники: [Google Public DNS JSON API](https://developers.google.com/speed/public-dns/docs/doh/json), [reqwest documentation](https://docs.rs/reqwest/latest/reqwest/).
+Источники: [Google Public DNS JSON API](https://developers.google.com/speed/public-dns/docs/doh/json), [официальные адреса Google Public DNS](https://developers.google.com/speed/public-dns/docs/using), [Cloudflare DoH JSON API](https://developers.cloudflare.com/1.1.1.1/encryption/dns-over-https/make-api-requests/), [адреса Cloudflare resolver](https://developers.cloudflare.com/1.1.1.1/infrastructure/network-operators/), [reqwest `resolve_to_addrs`](https://docs.rs/reqwest/0.12.28/reqwest/struct.ClientBuilder.html).
 
 ## Сверка каталога стратегий Flowseal
 
