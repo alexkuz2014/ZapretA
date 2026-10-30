@@ -49,7 +49,7 @@ cargo deny check
 
 ## Windows CI
 
-`.github/workflows/windows.yml` запускается для push в `main`, pull request и вручную. На `windows-latest` он проверяет форматирование, Clippy с `-D warnings`, тесты, `cargo audit`, `cargo deny`, затем строит `zapreta.exe` для MSVC и прикладывает его вместе с `SHA256SUMS.txt` к workflow run как временный artifact. Артефакт хранится 14 дней; это CI build, не официальный релиз и не подписанный бинарник.
+`.github/workflows/windows.yml` запускается для push в `main`, pull request и вручную. На `windows-latest` он проверяет форматирование, Clippy с `-D warnings`, тесты, `cargo audit`, `cargo deny`, затем строит `zapreta.exe` для MSVC и прикладывает его вместе с `SHA256SUMS.txt` к workflow run как временный artifact. Используются `actions/checkout@v7` и `actions/upload-artifact@v7` с Node 24 runtime. Артефакт хранится 14 дней; это CI build, не официальный релиз и не подписанный бинарник.
 
 Локальный `x86_64-pc-windows-gnullvm` использовался как запасной вариант, когда в установленном MSVC окружении не хватало `dbghelp.lib`. Он полезен для разработки, но CI и будущие релизы должны собираться целевым `x86_64-pc-windows-msvc`.
 
