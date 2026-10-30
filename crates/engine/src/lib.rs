@@ -478,4 +478,40 @@ mod tests {
         process.stop().unwrap();
         assert!(process.process_id().is_none());
     }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn dropping_engine_process_during_panic_terminates_child() {
+        use windows_sys::Win32::{
+            Foundation::{CloseHandle, WAIT_OBJECT_0},
+            System::Threading::{OpenProcess, PROCESS_SYNCHRONIZE, WaitForSingleObject},
+        };
+
+        let executable = PathBuf::from(std::env::var_os("WINDIR").unwrap())
+            .join("System32")
+            .join("cmd.exe");
+        let mut file = File::open(&executable).unwrap();
+        let digest = hash_reader(&mut file).unwrap();
+        let verified = EngineBundle::new(executable, digest).verify().unwrap();
+        let process = verified
+            .spawn(&["/C".into(), "ping -n 20 127.0.0.1 >NUL".into()])
+            .unwrap();
+        let process_id = process.process_id().unwrap();
+        // SAFETY: process_id belongs to the child created above; this wait handle
+        // remains valid after the Rust Child reaps its process.
+        let child = unsafe { OpenProcess(PROCESS_SYNCHRONIZE, 0, process_id) };
+        assert!(!child.is_null());
+
+        let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            drop(process);
+            panic!("simulate application panic while engine guard is live");
+        }));
+        assert!(panic.is_err());
+
+        // SAFETY: child is a valid process handle opened with SYNCHRONIZE.
+        let wait = unsafe { WaitForSingleObject(child, 5_000) };
+        // SAFETY: child handle is owned by this test.
+        unsafe { CloseHandle(child) };
+        assert_eq!(wait, WAIT_OBJECT_0, "child survived panic cleanup");
+    }
 }
