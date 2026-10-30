@@ -1,7 +1,7 @@
 //! Network access policy primitives. No requests or downloads are implemented yet.
 
 use serde::Deserialize;
-use std::{fmt, net::IpAddr, time::Duration};
+use std::{borrow::Cow, fmt, net::IpAddr, time::Duration};
 
 const GOOGLE_DOH_HOST: &str = "dns.google";
 const CLOUDFLARE_DOH_HOST: &str = "cloudflare-dns.com";
@@ -103,12 +103,13 @@ struct DnsJsonAnswer {
 
 pub struct DnsResolver {
     client: reqwest::Client,
+    providers: Vec<DohProvider>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct DohProvider {
     name: &'static str,
-    url: &'static str,
+    url: Cow<'static, str>,
     accept: &'static str,
     bootstrap_host: &'static str,
 }
@@ -116,13 +117,13 @@ struct DohProvider {
 const DOH_PROVIDERS: [DohProvider; 2] = [
     DohProvider {
         name: "Google Public DNS",
-        url: GOOGLE_DOH_URL,
+        url: Cow::Borrowed(GOOGLE_DOH_URL),
         accept: "application/x-javascript",
         bootstrap_host: GOOGLE_DOH_HOST,
     },
     DohProvider {
         name: "Cloudflare 1.1.1.1",
-        url: CLOUDFLARE_DOH_URL,
+        url: Cow::Borrowed(CLOUDFLARE_DOH_URL),
         accept: "application/dns-json",
         bootstrap_host: CLOUDFLARE_DOH_HOST,
     },
@@ -238,7 +239,16 @@ impl DnsResolver {
             .user_agent("ZapretA/0.1")
             .build()
             .map_err(|error| NetError(format!("cannot create DNS client: {error}")))?;
-        Ok(Self { client })
+        Ok(Self {
+            client,
+            providers: DOH_PROVIDERS
+                .iter()
+                .map(|provider| DohProvider {
+                    url: provider.url.clone(),
+                    ..provider.clone()
+                })
+                .collect(),
+        })
     }
 
     /// Resolves with the configured Windows resolver and returns deduplicated A/AAAA results.
@@ -264,7 +274,7 @@ impl DnsResolver {
     pub async fn doh(&self, hostname: &str) -> Result<DnsResolution, NetError> {
         validate_hostname(hostname).map_err(|error| NetError(error.to_string()))?;
         let mut failures = Vec::new();
-        for provider in DOH_PROVIDERS {
+        for provider in &self.providers {
             match self.query_doh_provider(hostname, provider).await {
                 Ok(result) => return Ok(result),
                 Err(error) => failures.push(format!("{}: {error}", provider.name)),
@@ -279,13 +289,13 @@ impl DnsResolver {
     async fn query_doh_provider(
         &self,
         hostname: &str,
-        provider: DohProvider,
+        provider: &DohProvider,
     ) -> Result<DnsResolution, NetError> {
         let mut addresses = Vec::new();
         for record_type in ["A", "AAAA"] {
             let mut request = self
                 .client
-                .get(provider.url)
+                .get(provider.url.as_ref())
                 .header(reqwest::header::ACCEPT, provider.accept)
                 .query(&[("name", hostname), ("type", record_type)]);
             if provider.name == "Google Public DNS" {
@@ -315,6 +325,29 @@ impl DnsResolver {
             provider: provider.name,
         })
     }
+
+    #[cfg(test)]
+    fn with_test_provider_urls(
+        timeout: Duration,
+        first_url: String,
+        second_url: String,
+    ) -> Result<Self, NetError> {
+        let client = reqwest::Client::builder()
+            .no_proxy()
+            .redirect(reqwest::redirect::Policy::none())
+            .timeout(timeout)
+            .build()
+            .map_err(|error| NetError(format!("cannot create test DNS client: {error}")))?;
+        let providers = DOH_PROVIDERS
+            .iter()
+            .zip([first_url, second_url])
+            .map(|(provider, url)| DohProvider {
+                url: Cow::Owned(url),
+                ..provider.clone()
+            })
+            .collect();
+        Ok(Self { client, providers })
+    }
 }
 
 fn parse_dns_json(input: &str, wanted_type: u16) -> Result<Vec<IpAddr>, NetError> {
@@ -339,6 +372,38 @@ fn parse_dns_json(input: &str, wanted_type: u16) -> Result<Vec<IpAddr>, NetError
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tokio::{
+        io::{AsyncReadExt, AsyncWriteExt},
+        net::TcpListener,
+    };
+
+    async fn local_http_server(
+        responses: Vec<(u16, &'static str)>,
+    ) -> (String, tokio::task::JoinHandle<Vec<String>>) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let handle = tokio::spawn(async move {
+            let mut requests = Vec::new();
+            for (status, body) in responses {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let mut request = vec![0; 4096];
+                let read = stream.read(&mut request).await.unwrap();
+                requests.push(String::from_utf8_lossy(&request[..read]).into_owned());
+                let reason = if status == 200 {
+                    "OK"
+                } else {
+                    "Service Unavailable"
+                };
+                let response = format!(
+                    "HTTP/1.1 {status} {reason}\r\nContent-Type: application/dns-json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                stream.write_all(response.as_bytes()).await.unwrap();
+            }
+            requests
+        });
+        (format!("http://{address}/dns-query"), handle)
+    }
 
     #[test]
     fn normalizes_and_validates_hostnames() {
@@ -384,5 +449,55 @@ mod tests {
                 .iter()
                 .all(|provider| provider.url.starts_with("https://"))
         );
+    }
+
+    #[tokio::test]
+    async fn doh_falls_back_to_second_provider_after_http_failure() {
+        let answer = r#"{"Status":0,"Answer":[{"type":1,"data":"192.0.2.40"}]}"#;
+        let (first_url, first_server) = local_http_server(vec![(503, "unavailable")]).await;
+        let (second_url, second_server) =
+            local_http_server(vec![(200, answer), (200, answer)]).await;
+        let resolver =
+            DnsResolver::with_test_provider_urls(Duration::from_secs(2), first_url, second_url)
+                .unwrap();
+        let result = resolver.doh("example.test").await.unwrap();
+        assert_eq!(result.provider, "Cloudflare 1.1.1.1");
+        assert_eq!(
+            result.addresses,
+            vec!["192.0.2.40".parse::<IpAddr>().unwrap()]
+        );
+        assert_eq!(first_server.await.unwrap().len(), 1);
+        let requests = second_server.await.unwrap();
+        assert_eq!(requests.len(), 2);
+        assert!(requests[0].contains("type=A"));
+        assert!(requests[1].contains("type=AAAA"));
+    }
+
+    #[tokio::test]
+    async fn doh_returns_error_when_both_local_providers_fail() {
+        let (first_url, first_server) = local_http_server(vec![(503, "unavailable")]).await;
+        let (second_url, second_server) = local_http_server(vec![(503, "unavailable")]).await;
+        let resolver =
+            DnsResolver::with_test_provider_urls(Duration::from_secs(2), first_url, second_url)
+                .unwrap();
+        let error = resolver.doh("example.test").await.unwrap_err();
+        assert!(error.to_string().contains("all DoH providers failed"));
+        assert_eq!(first_server.await.unwrap().len(), 1);
+        assert_eq!(second_server.await.unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn doh_falls_back_when_first_provider_returns_malformed_json() {
+        let answer = r#"{"Status":0,"Answer":[{"type":1,"data":"192.0.2.41"}]}"#;
+        let (first_url, first_server) = local_http_server(vec![(200, "not-json")]).await;
+        let (second_url, second_server) =
+            local_http_server(vec![(200, answer), (200, answer)]).await;
+        let resolver =
+            DnsResolver::with_test_provider_urls(Duration::from_secs(2), first_url, second_url)
+                .unwrap();
+        let result = resolver.doh("example.test").await.unwrap();
+        assert_eq!(result.provider, "Cloudflare 1.1.1.1");
+        assert_eq!(first_server.await.unwrap().len(), 1);
+        assert_eq!(second_server.await.unwrap().len(), 2);
     }
 }
