@@ -22,9 +22,17 @@ pub enum AddressSignal {
     Empty,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DnsResponseState {
+    Answer,
+    NoData,
+    NxDomain,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DnsFamilyResult {
     pub status: CheckStatus,
+    pub response: Observation<DnsResponseState>,
     pub addresses: Vec<std::net::IpAddr>,
     pub address_signal: Observation<AddressSignal>,
 }
@@ -49,10 +57,25 @@ pub struct BaselineReport {
 
 impl DnsFamilyResult {
     pub fn from_result(status: CheckStatus, addresses: Vec<std::net::IpAddr>) -> Self {
+        let response = if status != CheckStatus::Passed || addresses.is_empty() {
+            Observation::Unknown
+        } else {
+            Observation::Known(DnsResponseState::Answer)
+        };
+        Self::from_dns_response(status, response, addresses)
+    }
+
+    pub fn from_dns_response(
+        status: CheckStatus,
+        response: Observation<DnsResponseState>,
+        addresses: Vec<std::net::IpAddr>,
+    ) -> Self {
         let address_signal = if status != CheckStatus::Passed {
             Observation::Unknown
-        } else if addresses.is_empty() {
+        } else if response == Observation::Known(DnsResponseState::NoData) {
             Observation::Known(AddressSignal::Empty)
+        } else if addresses.is_empty() {
+            Observation::Unknown
         } else if addresses.iter().any(|ip| ip.is_unspecified()) {
             Observation::Known(AddressSignal::Unspecified)
         } else if addresses.iter().any(|ip| match ip {
@@ -67,6 +90,7 @@ impl DnsFamilyResult {
         };
         Self {
             status,
+            response,
             addresses,
             address_signal,
         }
@@ -86,20 +110,27 @@ pub fn dns_baseline_signal(dns: &DnsBaseline) -> Observation<ProbeSignal> {
             has_unknown_family = true;
             continue;
         }
-        if matches!(
-            system.address_signal,
-            Observation::Known(AddressSignal::Empty)
-        ) || matches!(doh.address_signal, Observation::Known(AddressSignal::Empty))
-        {
-            // Empty is ambiguous without explicit DNS RCODE/NODATA semantics.
-            has_unknown_family = true;
-            continue;
-        }
         has_comparable_family = true;
-        if normalized(&system.addresses) != normalized(&doh.addresses) {
-            return Observation::Known(ProbeSignal::PossibleDnsDivergence);
+        match (system.response, doh.response) {
+            (
+                Observation::Known(DnsResponseState::Answer),
+                Observation::Known(DnsResponseState::Answer),
+            ) => {
+                if normalized(&system.addresses) != normalized(&doh.addresses) {
+                    return Observation::Known(ProbeSignal::PossibleDnsDivergence);
+                }
+                has_special_answer |=
+                    is_special(system.address_signal) || is_special(doh.address_signal);
+            }
+            (Observation::Known(system_state), Observation::Known(doh_state))
+                if system_state == doh_state => {}
+            (Observation::Known(_), Observation::Known(_)) => {
+                return Observation::Known(ProbeSignal::PossibleDnsDivergence);
+            }
+            _ => {
+                has_unknown_family = true;
+            }
         }
-        has_special_answer |= is_special(system.address_signal) || is_special(doh.address_signal);
     }
     if has_special_answer {
         Observation::Known(ProbeSignal::PossibleDnsSinkholeAnswer)
@@ -263,7 +294,11 @@ mod tests {
 
     #[test]
     fn empty_and_special_dns_answers_are_signals_not_confirmed_spoofing() {
-        let empty = DnsFamilyResult::from_result(CheckStatus::Passed, vec![]);
+        let empty = DnsFamilyResult::from_dns_response(
+            CheckStatus::Passed,
+            Observation::Known(DnsResponseState::NoData),
+            vec![],
+        );
         assert_eq!(
             empty.address_signal,
             Observation::Known(AddressSignal::Empty)
@@ -300,12 +335,16 @@ mod tests {
     }
 
     #[test]
-    fn empty_family_answer_is_unknown_not_a_dns_interference_signal() {
+    fn matching_nodata_is_a_known_non_divergent_result() {
         let public_a = DnsFamilyResult::from_result(
             CheckStatus::Passed,
             vec!["203.0.113.10".parse().unwrap()],
         );
-        let empty_aaaa = DnsFamilyResult::from_result(CheckStatus::Passed, vec![]);
+        let empty_aaaa = DnsFamilyResult::from_dns_response(
+            CheckStatus::Passed,
+            Observation::Known(DnsResponseState::NoData),
+            vec![],
+        );
         let dns = DnsBaseline {
             system_a: public_a.clone(),
             system_aaaa: empty_aaaa.clone(),
@@ -313,7 +352,17 @@ mod tests {
             doh_aaaa: empty_aaaa,
             doh_provider: Observation::Known("test".into()),
         };
-        assert_eq!(dns_baseline_signal(&dns), Observation::Unknown);
+        assert_eq!(
+            dns_baseline_signal(&dns),
+            Observation::Known(ProbeSignal::NoObservedFailure)
+        );
+    }
+
+    #[test]
+    fn untyped_empty_result_stays_unknown() {
+        let result = DnsFamilyResult::from_result(CheckStatus::Passed, vec![]);
+        assert_eq!(result.response, Observation::Unknown);
+        assert_eq!(result.address_signal, Observation::Unknown);
     }
 
     #[test]
@@ -364,6 +413,36 @@ mod tests {
         assert_eq!(
             dns_baseline_signal(&dns),
             Observation::Known(ProbeSignal::NoObservedFailure)
+        );
+    }
+
+    #[test]
+    fn differing_nxdomain_and_nodata_statuses_are_dns_divergence() {
+        let system_a = DnsFamilyResult::from_dns_response(
+            CheckStatus::Passed,
+            Observation::Known(DnsResponseState::NxDomain),
+            vec![],
+        );
+        let doh_a = DnsFamilyResult::from_dns_response(
+            CheckStatus::Passed,
+            Observation::Known(DnsResponseState::NoData),
+            vec![],
+        );
+        let no_aaaa = DnsFamilyResult::from_dns_response(
+            CheckStatus::Passed,
+            Observation::Known(DnsResponseState::NoData),
+            vec![],
+        );
+        let dns = DnsBaseline {
+            system_a,
+            system_aaaa: no_aaaa.clone(),
+            doh_a,
+            doh_aaaa: no_aaaa,
+            doh_provider: Observation::Known("mock".into()),
+        };
+        assert_eq!(
+            dns_baseline_signal(&dns),
+            Observation::Known(ProbeSignal::PossibleDnsDivergence)
         );
     }
 }

@@ -37,7 +37,8 @@ async fn diagnose() -> ExitCode {
     use std::time::Duration;
     use zapreta_net::{AllowedHost, DnsResolver, HttpsProber, NetworkPurpose};
     use zapreta_probe::{
-        BaselineReport, CheckStatus, DnsBaseline, DnsFamilyResult, Observation, dns_baseline_signal,
+        BaselineReport, CheckStatus, DnsBaseline, DnsFamilyResult, DnsResponseState, Observation,
+        dns_baseline_signal,
     };
 
     let resolver = match DnsResolver::new(Duration::from_secs(5)) {
@@ -61,15 +62,16 @@ async fn diagnose() -> ExitCode {
     );
 
     let mut all_passed = true;
-    let mut target_dns: Option<(zapreta_net::DnsResolution, zapreta_net::DnsResolution)> = None;
+    let mut target_dns: Option<(
+        Result<zapreta_net::DnsResolution, zapreta_net::NetError>,
+        Result<zapreta_net::DnsResolution, zapreta_net::NetError>,
+    )> = None;
     for hostname in ["www.youtube.com", "example.com"] {
         println!("\nDNS: {hostname}");
         let system = resolver.system(hostname).await;
         let doh = resolver.doh(hostname).await;
         if hostname == "www.youtube.com" {
-            if let (Ok(system), Ok(doh)) = (&system, &doh) {
-                target_dns = Some((system.clone(), doh.clone()));
-            }
+            target_dns = Some((system.clone(), doh.clone()));
         }
         match (&system, &doh) {
             (Ok(system), Ok(doh)) if system.addresses == doh.addresses => {
@@ -134,29 +136,63 @@ async fn diagnose() -> ExitCode {
         }
     }
     if let Some((system, doh)) = target_dns {
-        let split = |resolution: &zapreta_net::DnsResolution, is_v4: bool| {
-            let addresses: Vec<std::net::IpAddr> = resolution
-                .addresses
-                .iter()
-                .copied()
-                .filter(|ip| ip.is_ipv4() == is_v4)
-                .collect();
-            let status = if addresses.is_empty() {
-                // `system()` performs an untyped lookup. Absence in its combined
-                // result does not prove a successful family-specific NODATA answer.
-                CheckStatus::NotRun
-            } else {
-                CheckStatus::Passed
+        let convert = |family: &zapreta_net::DnsFamilyResolution| {
+            let (status, response) = match family.state {
+                zapreta_net::DnsAnswerState::Answer => (
+                    CheckStatus::Passed,
+                    Observation::Known(DnsResponseState::Answer),
+                ),
+                zapreta_net::DnsAnswerState::NoData => (
+                    CheckStatus::Passed,
+                    Observation::Known(DnsResponseState::NoData),
+                ),
+                zapreta_net::DnsAnswerState::NxDomain => (
+                    CheckStatus::Passed,
+                    Observation::Known(DnsResponseState::NxDomain),
+                ),
+                zapreta_net::DnsAnswerState::Incomplete => {
+                    (CheckStatus::Passed, Observation::Unknown)
+                }
+                zapreta_net::DnsAnswerState::NotQueried => {
+                    (CheckStatus::NotRun, Observation::Unknown)
+                }
             };
-            DnsFamilyResult::from_result(status, addresses)
+            DnsFamilyResult::from_dns_response(status, response, family.addresses.clone())
+        };
+        let failed = || {
+            DnsFamilyResult::from_dns_response(
+                CheckStatus::Failed,
+                Observation::Unknown,
+                Vec::new(),
+            )
+        };
+        let (system_a, system_aaaa) = match &system {
+            Ok(result) => (convert(&result.ipv4), convert(&result.ipv6)),
+            Err(_) => (failed(), failed()),
+        };
+        let (doh_a, doh_aaaa, doh_provider) = match &doh {
+            Ok(result) => (
+                convert(&result.ipv4),
+                convert(&result.ipv6),
+                Observation::Known(result.provider.to_owned()),
+            ),
+            Err(_) => (failed(), failed(), Observation::Unknown),
         };
         let dns = DnsBaseline {
-            system_a: split(&system, true),
-            system_aaaa: split(&system, false),
-            doh_a: split(&doh, true),
-            doh_aaaa: split(&doh, false),
-            doh_provider: Observation::Known(doh.provider.to_owned()),
+            system_a,
+            system_aaaa,
+            doh_a,
+            doh_aaaa,
+            doh_provider,
         };
+        println!(
+            "\nDNS A/AAAA states: system A {:?}, AAAA {:?}; DoH A {:?}, AAAA {:?}",
+            dns.system_a.response,
+            dns.system_aaaa.response,
+            dns.doh_a.response,
+            dns.doh_aaaa.response
+        );
+        println!("DNS baseline: {:?}", dns_baseline_signal(&dns));
         let tcp_control = endpoint_results
             .iter()
             .find(|(host, _)| *host == "example.com")

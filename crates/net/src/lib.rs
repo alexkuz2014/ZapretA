@@ -71,8 +71,25 @@ pub fn validate_hostname(hostname: &str) -> Result<(), HostnameError> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DnsResolution {
     pub addresses: Vec<IpAddr>,
+    pub ipv4: DnsFamilyResolution,
+    pub ipv6: DnsFamilyResolution,
     /// Provider used (`system`, `Google Public DNS`, or `Cloudflare 1.1.1.1`).
     pub provider: &'static str,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DnsAnswerState {
+    Answer,
+    NoData,
+    NxDomain,
+    Incomplete,
+    NotQueried,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DnsFamilyResolution {
+    pub state: DnsAnswerState,
+    pub addresses: Vec<IpAddr>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -92,6 +109,12 @@ struct DnsJsonResponse {
     status: u16,
     #[serde(rename = "Answer", default)]
     answers: Vec<DnsJsonAnswer>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ParsedDnsJson {
+    state: DnsAnswerState,
+    addresses: Vec<IpAddr>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -287,7 +310,33 @@ impl DnsResolver {
         if addresses.is_empty() {
             return Err(NetError("system DNS returned no addresses".into()));
         }
+        let ipv4_addresses = addresses
+            .iter()
+            .copied()
+            .filter(|ip| ip.is_ipv4())
+            .collect::<Vec<_>>();
+        let ipv6_addresses = addresses
+            .iter()
+            .copied()
+            .filter(|ip| ip.is_ipv6())
+            .collect::<Vec<_>>();
         Ok(DnsResolution {
+            ipv4: DnsFamilyResolution {
+                state: if ipv4_addresses.is_empty() {
+                    DnsAnswerState::NotQueried
+                } else {
+                    DnsAnswerState::Answer
+                },
+                addresses: ipv4_addresses,
+            },
+            ipv6: DnsFamilyResolution {
+                state: if ipv6_addresses.is_empty() {
+                    DnsAnswerState::NotQueried
+                } else {
+                    DnsAnswerState::Answer
+                },
+                addresses: ipv6_addresses,
+            },
             addresses,
             provider: "system",
         })
@@ -315,7 +364,8 @@ impl DnsResolver {
         hostname: &str,
         provider: &DohProvider,
     ) -> Result<DnsResolution, NetError> {
-        let mut addresses = Vec::new();
+        let mut ipv4 = None;
+        let mut ipv6 = None;
         for record_type in ["A", "AAAA"] {
             let mut request = self
                 .client
@@ -337,15 +387,33 @@ impl DnsResolver {
                 .await
                 .map_err(|error| NetError(format!("reading response failed: {error}")))?;
             let wanted_type = if record_type == "A" { 1 } else { 28 };
-            addresses.extend(parse_dns_json(&response_text, wanted_type)?);
+            let parsed = parse_dns_json(&response_text, wanted_type)?;
+            if wanted_type == 1 {
+                ipv4 = Some(parsed);
+            } else {
+                ipv6 = Some(parsed);
+            }
         }
+        let ipv4 = ipv4.expect("A query is always performed");
+        let ipv6 = ipv6.expect("AAAA query is always performed");
+        let mut addresses = ipv4
+            .addresses
+            .iter()
+            .chain(&ipv6.addresses)
+            .copied()
+            .collect::<Vec<_>>();
         addresses.sort_unstable();
         addresses.dedup();
-        if addresses.is_empty() {
-            return Err(NetError("provider returned no A/AAAA addresses".into()));
-        }
         Ok(DnsResolution {
             addresses,
+            ipv4: DnsFamilyResolution {
+                state: ipv4.state,
+                addresses: ipv4.addresses,
+            },
+            ipv6: DnsFamilyResolution {
+                state: ipv6.state,
+                addresses: ipv6.addresses,
+            },
             provider: provider.name,
         })
     }
@@ -374,23 +442,52 @@ impl DnsResolver {
     }
 }
 
-fn parse_dns_json(input: &str, wanted_type: u16) -> Result<Vec<IpAddr>, NetError> {
+fn parse_dns_json(input: &str, wanted_type: u16) -> Result<ParsedDnsJson, NetError> {
     let response: DnsJsonResponse = serde_json::from_str(input)
         .map_err(|error| NetError(format!("invalid DoH JSON: {error}")))?;
-    if response.status != 0 {
-        return Err(NetError(format!("DNS status {}", response.status)));
+    if response.status == 3 {
+        return Ok(ParsedDnsJson {
+            state: DnsAnswerState::NxDomain,
+            addresses: Vec::new(),
+        });
     }
-    response
+    if response.status != 0 {
+        return Err(NetError(format!(
+            "unsupported DNS status {}",
+            response.status
+        )));
+    }
+    let has_non_address_answer = response
+        .answers
+        .iter()
+        .any(|answer| answer.record_type != wanted_type);
+    let addresses = response
         .answers
         .into_iter()
         .filter(|answer| answer.record_type == wanted_type)
         .map(|answer| {
-            answer
-                .data
-                .parse::<IpAddr>()
-                .map_err(|_| NetError(format!("invalid IP address in DNS answer: {}", answer.data)))
+            let address = answer.data.parse::<IpAddr>().map_err(|_| {
+                NetError(format!("invalid IP address in DNS answer: {}", answer.data))
+            })?;
+            if (wanted_type == 1 && !address.is_ipv4()) || (wanted_type == 28 && !address.is_ipv6())
+            {
+                return Err(NetError(format!(
+                    "DNS type {wanted_type} has mismatched address: {address}"
+                )));
+            }
+            Ok(address)
         })
-        .collect()
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(ParsedDnsJson {
+        state: if !addresses.is_empty() {
+            DnsAnswerState::Answer
+        } else if has_non_address_answer {
+            DnsAnswerState::Incomplete
+        } else {
+            DnsAnswerState::NoData
+        },
+        addresses,
+    })
 }
 
 #[cfg(test)]
@@ -446,20 +543,60 @@ mod tests {
     fn parses_only_requested_dns_record_type() {
         let json = r#"{"Status":0,"Answer":[{"name":"example.com.","type":1,"TTL":60,"data":"192.0.2.1"},{"name":"example.com.","type":28,"TTL":60,"data":"2001:db8::1"}]}"#;
         assert_eq!(
-            parse_dns_json(json, 1).unwrap(),
+            parse_dns_json(json, 1).unwrap().addresses,
             vec!["192.0.2.1".parse::<IpAddr>().unwrap()]
         );
         assert_eq!(
-            parse_dns_json(json, 28).unwrap(),
+            parse_dns_json(json, 28).unwrap().addresses,
             vec!["2001:db8::1".parse::<IpAddr>().unwrap()]
         );
     }
 
     #[test]
     fn rejects_dns_errors_and_invalid_addresses() {
-        assert!(parse_dns_json(r#"{"Status":3}"#, 1).is_err());
+        assert_eq!(
+            parse_dns_json(r#"{"Status":3}"#, 1).unwrap().state,
+            DnsAnswerState::NxDomain
+        );
+        assert!(parse_dns_json(r#"{"Status":2}"#, 1).is_err());
         let json = r#"{"Status":0,"Answer":[{"type":1,"data":"not-an-ip"}]}"#;
         assert!(parse_dns_json(json, 1).is_err());
+    }
+
+    #[test]
+    fn distinguishes_dns_nodata_nxdomain_and_answers() {
+        let nodata = parse_dns_json(r#"{"Status":0}"#, 28).unwrap();
+        assert_eq!(nodata.state, DnsAnswerState::NoData);
+        assert!(nodata.addresses.is_empty());
+
+        let nxdomain = parse_dns_json(r#"{"Status":3}"#, 1).unwrap();
+        assert_eq!(nxdomain.state, DnsAnswerState::NxDomain);
+        assert!(nxdomain.addresses.is_empty());
+
+        let answer = parse_dns_json(
+            r#"{"Status":0,"Answer":[{"type":28,"data":"2001:db8::2"}]}"#,
+            28,
+        )
+        .unwrap();
+        assert_eq!(answer.state, DnsAnswerState::Answer);
+        assert_eq!(
+            answer.addresses,
+            vec!["2001:db8::2".parse::<IpAddr>().unwrap()]
+        );
+
+        let alias_only = parse_dns_json(
+            r#"{"Status":0,"Answer":[{"type":5,"data":"alias.example.test."}]}"#,
+            1,
+        )
+        .unwrap();
+        assert_eq!(alias_only.state, DnsAnswerState::Incomplete);
+        assert!(
+            parse_dns_json(
+                r#"{"Status":0,"Answer":[{"type":28,"data":"192.0.2.1"}]}"#,
+                28,
+            )
+            .is_err()
+        );
     }
 
     #[test]
@@ -523,6 +660,26 @@ mod tests {
         assert_eq!(result.provider, "Cloudflare 1.1.1.1");
         assert_eq!(first_server.await.unwrap().len(), 1);
         assert_eq!(second_server.await.unwrap().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn nodata_is_a_valid_answer_and_does_not_trigger_provider_fallback() {
+        let (first_url, first_server) =
+            local_http_server(vec![(200, r#"{"Status":0}"#), (200, r#"{"Status":0}"#)]).await;
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let unused_address = listener.local_addr().unwrap();
+        drop(listener);
+        let second_url = format!("http://{unused_address}/dns-query");
+        let resolver =
+            DnsResolver::with_test_provider_urls(Duration::from_secs(2), first_url, second_url)
+                .unwrap();
+
+        let result = resolver.doh("example.test").await.unwrap();
+        assert_eq!(result.ipv4.state, DnsAnswerState::NoData);
+        assert_eq!(result.ipv6.state, DnsAnswerState::NoData);
+        assert!(result.addresses.is_empty());
+        assert_eq!(result.provider, "Google Public DNS");
+        assert_eq!(first_server.await.unwrap().len(), 2);
     }
 
     #[tokio::test]
