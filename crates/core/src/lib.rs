@@ -202,6 +202,10 @@ pub struct StrategyCatalog {
 pub struct Strategy {
     pub id: String,
     pub label: String,
+    /// Validated ordered engine arguments imported from a pinned source profile.
+    /// This preserves repeated flags and `--new` boundaries exactly.
+    #[serde(default)]
+    pub source_argv: Option<Vec<String>>,
     #[serde(default)]
     pub wire_tcp: Vec<String>,
     #[serde(default)]
@@ -336,20 +340,57 @@ impl StrategyCatalog {
                     strategy.id
                 )));
             }
-            if strategy.rules.is_empty() {
-                return Err(CatalogError(format!(
-                    "strategy {} has no rules",
-                    strategy.id
-                )));
-            }
-            for port in strategy.wire_tcp.iter().chain(&strategy.wire_udp) {
-                validate_port_spec(port)?;
-            }
-            for rule in &strategy.rules {
-                validate_rule(rule)?;
+            if let Some(argv) = &strategy.source_argv {
+                if !strategy.rules.is_empty()
+                    || !strategy.wire_tcp.is_empty()
+                    || !strategy.wire_udp.is_empty()
+                {
+                    return Err(CatalogError(format!(
+                        "strategy {} must use either source_argv or structured rules, not both",
+                        strategy.id
+                    )));
+                }
+                if argv.is_empty() || argv.len() > 256 {
+                    return Err(CatalogError(format!(
+                        "strategy {} source_argv must contain 1 to 256 tokens",
+                        strategy.id
+                    )));
+                }
+                for argument in argv {
+                    validate_reference_argument(argument)?;
+                }
+            } else {
+                if strategy.rules.is_empty() {
+                    return Err(CatalogError(format!(
+                        "strategy {} has no rules",
+                        strategy.id
+                    )));
+                }
+                for port in strategy.wire_tcp.iter().chain(&strategy.wire_udp) {
+                    validate_port_spec(port)?;
+                }
+                for rule in &strategy.rules {
+                    validate_rule(rule)?;
+                }
             }
         }
         Ok(())
+    }
+}
+
+impl Strategy {
+    /// Converts a reviewed source snapshot into the validated runtime strategy
+    /// representation. The source must still be pinned and pass its own checks.
+    pub fn from_source_snapshot(snapshot: &SourceStrategySnapshot) -> Result<Self, CatalogError> {
+        snapshot.validate()?;
+        Ok(Self {
+            id: snapshot.profile_id.clone(),
+            label: snapshot.profile_name.clone(),
+            source_argv: Some(snapshot.argv.clone()),
+            wire_tcp: Vec::new(),
+            wire_udp: Vec::new(),
+            rules: Vec::new(),
+        })
     }
 }
 
@@ -543,6 +584,9 @@ pub fn rule_argv(rule: &Rule) -> Vec<String> {
 /// Creates a flat argv vector for the selected profile. `--new` is kept between
 /// rules so each filter/desync block retains its own settings.
 pub fn strategy_argv(strategy: &Strategy) -> Vec<String> {
+    if let Some(argv) = &strategy.source_argv {
+        return argv.clone();
+    }
     let mut args = Vec::new();
     if !strategy.wire_tcp.is_empty() {
         args.push(format!("--wf-tcp={}", strategy.wire_tcp.join(",")));
@@ -633,6 +677,39 @@ hostlists = ["lists/general.txt"]
             argv: vec!["--wf-tcp=80,443".into()],
         };
         assert!(snapshot.validate().is_ok());
+        let strategy = Strategy::from_source_snapshot(&snapshot).unwrap();
+        assert_eq!(strategy_argv(&strategy), snapshot.argv);
+        let mut runtime_catalog = StrategyCatalog {
+            schema_version: 1,
+            engine_version: "un-pinned-test-fixture".into(),
+            source_revision: snapshot.source_commit.clone(),
+            strategies: vec![strategy],
+        };
+        assert!(runtime_catalog.validate().is_ok());
+        runtime_catalog.strategies[0].source_argv = Some(vec!["--shell=unsafe".into()]);
+        assert!(runtime_catalog.validate().is_err());
+        runtime_catalog.strategies[0].source_argv = Some(vec!["--wf-tcp=443".into()]);
+        runtime_catalog.strategies[0].rules.push(Rule {
+            transport: Transport::Tcp,
+            ports: vec!["443".into()],
+            l7_protocols: Vec::new(),
+            hostlists: Vec::new(),
+            hostlist_excludes: Vec::new(),
+            ipsets: Vec::new(),
+            ipset_excludes: Vec::new(),
+            desync_methods: vec![DesyncMethod::Fake],
+            repeats: None,
+            fooling: None,
+            cutoff: None,
+            split_position: None,
+            split_sequence_overlap: None,
+            split_pattern: None,
+            hostfakesplit_modifier: None,
+            badseq_increment: None,
+            fake_payloads: Vec::new(),
+        });
+        assert!(runtime_catalog.validate().is_err());
+
         snapshot.argv[0] = "--unapproved=anything".into();
         assert!(snapshot.validate().is_err());
         snapshot.argv[0] = "--hostlist=../outside.txt".into();
@@ -693,6 +770,21 @@ hostlists = ["lists/general.txt"]
             assert_eq!(
                 snapshot.argv, actual,
                 "argv mismatch for {}",
+                snapshot.profile_name
+            );
+
+            let runtime_strategy = Strategy::from_source_snapshot(&snapshot).unwrap();
+            let runtime_catalog = StrategyCatalog {
+                schema_version: 1,
+                engine_version: "un-pinned-test-fixture".into(),
+                source_revision: snapshot.source_commit.clone(),
+                strategies: vec![runtime_strategy.clone()],
+            };
+            runtime_catalog.validate().unwrap();
+            assert_eq!(
+                strategy_argv(&runtime_strategy),
+                actual,
+                "production strategy_argv mismatch for {}",
                 snapshot.profile_name
             );
         }
