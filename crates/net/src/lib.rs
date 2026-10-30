@@ -140,6 +140,8 @@ pub struct HttpsProbeResult {
 
 pub struct HttpsProber {
     client: reqwest::Client,
+    #[cfg(test)]
+    test_base_url: Option<String>,
 }
 
 impl HttpsProber {
@@ -151,7 +153,11 @@ impl HttpsProber {
             .user_agent("ZapretA/0.1")
             .build()
             .map_err(|error| NetError(format!("cannot create HTTPS probe client: {error}")))?;
-        Ok(Self { client })
+        Ok(Self {
+            client,
+            #[cfg(test)]
+            test_base_url: None,
+        })
     }
 
     /// Makes a direct HTTPS GET, reads at most `max_bytes`, and never follows redirects.
@@ -177,6 +183,12 @@ impl HttpsProber {
                 "probe body limit must be greater than zero".into(),
             ));
         }
+        #[cfg(test)]
+        let url = match self.test_base_url.as_ref() {
+            Some(base) => format!("{base}{path}"),
+            None => format!("https://{}{path}", destination.hostname),
+        };
+        #[cfg(not(test))]
         let url = format!("https://{}{path}", destination.hostname);
         let started = std::time::Instant::now();
         let mut response = self
@@ -199,10 +211,6 @@ impl HttpsProber {
                 body_limited = true;
                 break;
             }
-            if bytes_read == max_bytes {
-                body_limited = true;
-                break;
-            }
         }
         Ok(HttpsProbeResult {
             hostname: destination.hostname.clone(),
@@ -210,6 +218,22 @@ impl HttpsProber {
             elapsed_ms: started.elapsed().as_millis(),
             bytes_read,
             body_limited,
+        })
+    }
+}
+
+#[cfg(test)]
+impl HttpsProber {
+    fn with_test_base_url(timeout: Duration, base_url: String) -> Result<Self, NetError> {
+        let client = reqwest::Client::builder()
+            .no_proxy()
+            .redirect(reqwest::redirect::Policy::none())
+            .timeout(timeout)
+            .build()
+            .map_err(|error| NetError(format!("cannot create test HTTPS client: {error}")))?;
+        Ok(Self {
+            client,
+            test_base_url: Some(base_url),
         })
     }
 }
@@ -499,5 +523,68 @@ mod tests {
         assert_eq!(result.provider, "Cloudflare 1.1.1.1");
         assert_eq!(first_server.await.unwrap().len(), 1);
         assert_eq!(second_server.await.unwrap().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn https_probe_obeys_empty_exact_and_oversized_body_limits() {
+        let (url, server) = local_http_server(vec![(200, ""), (200, "1234"), (200, "12345")]).await;
+        let prober = HttpsProber::with_test_base_url(Duration::from_secs(2), url).unwrap();
+        let host = AllowedHost::new("example.test", NetworkPurpose::Probe).unwrap();
+
+        let empty = prober.get(&host, "/empty", 4).await.unwrap();
+        assert_eq!(empty.bytes_read, 0);
+        assert!(!empty.body_limited);
+
+        let exact = prober.get(&host, "/exact", 4).await.unwrap();
+        assert_eq!(exact.bytes_read, 4);
+        assert!(!exact.body_limited);
+
+        let oversized = prober.get(&host, "/large", 4).await.unwrap();
+        assert_eq!(oversized.bytes_read, 4);
+        assert!(oversized.body_limited);
+        assert_eq!(server.await.unwrap().len(), 3);
+    }
+
+    #[tokio::test]
+    async fn https_probe_reports_redirect_without_following_it() {
+        let (url, server) = local_http_server(vec![(302, "")]).await;
+        let prober = HttpsProber::with_test_base_url(Duration::from_secs(2), url).unwrap();
+        let host = AllowedHost::new("example.test", NetworkPurpose::Probe).unwrap();
+        let result = prober.get(&host, "/redirect", 16).await.unwrap();
+        assert_eq!(result.status_code, 302);
+        assert_eq!(server.await.unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn https_probe_surfaces_local_connection_refusal() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        drop(listener);
+        let prober =
+            HttpsProber::with_test_base_url(Duration::from_secs(2), format!("http://{address}"))
+                .unwrap();
+        let host = AllowedHost::new("example.test", NetworkPurpose::Probe).unwrap();
+        assert!(prober.get(&host, "/refused", 16).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn https_probe_times_out_on_a_stalled_local_response() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut request = vec![0; 1024];
+            let _ = stream.read(&mut request).await.unwrap();
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            let _ = stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+                .await;
+        });
+        let prober =
+            HttpsProber::with_test_base_url(Duration::from_millis(30), format!("http://{address}"))
+                .unwrap();
+        let host = AllowedHost::new("example.test", NetworkPurpose::Probe).unwrap();
+        assert!(prober.get(&host, "/slow", 16).await.is_err());
+        server.await.unwrap();
     }
 }
