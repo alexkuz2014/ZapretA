@@ -416,6 +416,16 @@ fn hash_reader(reader: &mut impl Read) -> io::Result<String> {
 mod tests {
     use super::*;
 
+    #[cfg(target_os = "windows")]
+    fn verified_test_cmd() -> VerifiedEngine {
+        let executable = PathBuf::from(std::env::var_os("WINDIR").unwrap())
+            .join("System32")
+            .join("cmd.exe");
+        let mut file = File::open(&executable).unwrap();
+        let digest = hash_reader(&mut file).unwrap();
+        EngineBundle::new(executable, digest).verify().unwrap()
+    }
+
     #[test]
     fn detects_known_conflicting_process_names_case_insensitively() {
         for name in [
@@ -465,13 +475,7 @@ mod tests {
     #[cfg(target_os = "windows")]
     #[test]
     fn launches_only_after_verification_and_stops_child() {
-        let executable = PathBuf::from(std::env::var_os("WINDIR").unwrap())
-            .join("System32")
-            .join("cmd.exe");
-        let mut file = File::open(&executable).unwrap();
-        let digest = hash_reader(&mut file).unwrap();
-        let verified = EngineBundle::new(executable, digest).verify().unwrap();
-        let mut process = verified
+        let mut process = verified_test_cmd()
             .spawn(&["/C".into(), "exit".into(), "0".into()])
             .unwrap();
         assert!(process.process_id().is_some());
@@ -487,13 +491,7 @@ mod tests {
             System::Threading::{OpenProcess, PROCESS_SYNCHRONIZE, WaitForSingleObject},
         };
 
-        let executable = PathBuf::from(std::env::var_os("WINDIR").unwrap())
-            .join("System32")
-            .join("cmd.exe");
-        let mut file = File::open(&executable).unwrap();
-        let digest = hash_reader(&mut file).unwrap();
-        let verified = EngineBundle::new(executable, digest).verify().unwrap();
-        let process = verified
+        let process = verified_test_cmd()
             .spawn(&["/C".into(), "ping -n 20 127.0.0.1 >NUL".into()])
             .unwrap();
         let process_id = process.process_id().unwrap();
@@ -513,5 +511,81 @@ mod tests {
         // SAFETY: child handle is owned by this test.
         unsafe { CloseHandle(child) };
         assert_eq!(wait, WAIT_OBJECT_0, "child survived panic cleanup");
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn abrupt_parent_exit_closes_job_and_terminates_engine_child() {
+        use std::io::{BufRead, BufReader};
+        use windows_sys::Win32::{
+            Foundation::{CloseHandle, WAIT_OBJECT_0},
+            System::Threading::{OpenProcess, PROCESS_SYNCHRONIZE, WaitForSingleObject},
+        };
+
+        const HELPER_ENV: &str = "ZAPRETA_JOB_CLOSE_HELPER";
+        if std::env::var_os(HELPER_ENV).is_some() {
+            let process = verified_test_cmd()
+                .spawn(&["/C".into(), "ping -n 20 127.0.0.1 >NUL".into()])
+                .unwrap();
+            let pid = process.process_id().unwrap();
+            let stdout = std::io::stdout();
+            let mut output = stdout.lock();
+            use std::io::Write;
+            writeln!(output, "ENGINE_PID={pid}").unwrap();
+            output.flush().unwrap();
+            let mut release = [0_u8; 1];
+            let _ = std::io::stdin().read_exact(&mut release);
+            std::process::exit(0);
+        }
+
+        let test_exe = std::env::current_exe().unwrap();
+        let mut parent = Command::new(test_exe)
+            .args([
+                "--exact",
+                "tests::abrupt_parent_exit_closes_job_and_terminates_engine_child",
+                "--nocapture",
+            ])
+            .env(HELPER_ENV, "1")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let stdout = parent.stdout.take().unwrap();
+        let mut reader = BufReader::new(stdout);
+        let mut process_id = None;
+        let mut line = String::new();
+        loop {
+            line.clear();
+            if reader.read_line(&mut line).unwrap() == 0 {
+                break;
+            }
+            if let Some(value) = line.trim().strip_prefix("ENGINE_PID=") {
+                process_id = value.parse::<u32>().ok();
+                break;
+            }
+        }
+        let Some(process_id) = process_id else {
+            let _ = parent.kill();
+            let _ = parent.wait();
+            panic!("helper did not report its engine child PID");
+        };
+
+        // SAFETY: process_id is the helper's child and helper remains blocked
+        // on stdin until the parent test kills it.
+        let child = unsafe { OpenProcess(PROCESS_SYNCHRONIZE, 0, process_id) };
+        if child.is_null() {
+            let _ = parent.kill();
+            let _ = parent.wait();
+            panic!("could not open engine child for synchronization");
+        }
+        let _ = parent.kill();
+        let _ = parent.wait();
+
+        // SAFETY: valid process handle opened with PROCESS_SYNCHRONIZE.
+        let wait = unsafe { WaitForSingleObject(child, 5_000) };
+        // SAFETY: process handle is owned by this test.
+        unsafe { CloseHandle(child) };
+        assert_eq!(wait, WAIT_OBJECT_0, "engine survived abrupt parent exit");
     }
 }
