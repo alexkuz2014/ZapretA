@@ -6,3 +6,4 @@ license.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+zapreta-core = { version = "0.1.0", path = "../core" }

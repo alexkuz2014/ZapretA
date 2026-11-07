@@ -186,6 +186,39 @@ impl HttpsProber {
         })
     }
 
+    /// Like [`HttpsProber::new`], but connects to the given addresses for the
+    /// given hostnames instead of resolving them. TLS SNI and certificate
+    /// validation still use the hostname. Used when system DNS answers for a
+    /// site are replaced by DoH answers.
+    pub fn with_overrides(
+        timeout: Duration,
+        overrides: &[(String, Vec<IpAddr>)],
+    ) -> Result<Self, NetError> {
+        let mut builder = reqwest::Client::builder()
+            .no_proxy()
+            .redirect(reqwest::redirect::Policy::none())
+            .timeout(timeout)
+            .user_agent("ZapretA/0.1");
+        for (host, addresses) in overrides {
+            validate_hostname(host).map_err(|error| NetError(error.to_string()))?;
+            let sockets: Vec<std::net::SocketAddr> = addresses
+                .iter()
+                .map(|ip| std::net::SocketAddr::new(*ip, 443))
+                .collect();
+            if !sockets.is_empty() {
+                builder = builder.resolve_to_addrs(host, &sockets);
+            }
+        }
+        let client = builder
+            .build()
+            .map_err(|error| NetError(format!("cannot create HTTPS probe client: {error}")))?;
+        Ok(Self {
+            client,
+            #[cfg(test)]
+            test_base_url: None,
+        })
+    }
+
     /// Makes a direct HTTPS GET, reads at most `max_bytes`, and never follows redirects.
     pub async fn get(
         &self,

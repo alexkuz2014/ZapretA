@@ -3,6 +3,7 @@ name: Windows CI
 on:
   push:
     branches: [main]
+    tags: ['v*']
   pull_request:
   workflow_dispatch:
 
@@ -69,3 +70,57 @@ jobs:
             SHA256SUMS.txt
           if-no-files-found: error
           retention-days: 14
+
+  release:
+    # Publishes a GitHub Release only for version tags, from the exact MSVC
+    # build that passed fmt, Clippy, tests, audit and deny above.
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build-test-audit
+    runs-on: windows-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v7
+
+      - name: Download verified build
+        uses: actions/download-artifact@v7
+        with:
+          name: ZapretA-windows-x64
+          path: build
+
+      - name: Package release archive
+        run: |
+          $tag = "${{ github.ref_name }}"
+          $dir = "ZapretA-$tag-windows-x64"
+          New-Item -ItemType Directory -Path $dir | Out-Null
+          $exe = Get-ChildItem -Path build -Recurse -Filter zapreta.exe | Select-Object -First 1
+          if (-not $exe) { throw "zapreta.exe missing from build artifact" }
+          Copy-Item $exe.FullName "$dir\ZapretA.exe"
+          Copy-Item LICENSE, docs\THIRD_PARTY_NOTICES.md, docs\SBOM.md -Destination $dir
+          Copy-Item crates\app\assets\engine\FLOWSEAL_LICENSE.txt -Destination $dir
+          Copy-Item packaging\README-RU.txt "$dir\ПРОЧТИ_МЕНЯ.txt"
+          $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath "$dir\ZapretA.exe").Hash.ToLowerInvariant()
+          "$hash  ZapretA.exe" | Set-Content -Encoding ascii "$dir\SHA256SUMS.txt"
+          Compress-Archive -Path $dir -DestinationPath "$dir.zip"
+          $zipHash = (Get-FileHash -Algorithm SHA256 -LiteralPath "$dir.zip").Hash.ToLowerInvariant()
+          "$hash  ZapretA.exe`n$zipHash  $dir.zip" | Set-Content -Encoding ascii SHA256SUMS.txt
+          Get-Content SHA256SUMS.txt
+        shell: pwsh
+
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $tag = "${{ github.ref_name }}"
+          $notes = @"
+          Windows x64, MSVC build from CI. Unsigned: SmartScreen and some antivirus products may warn (WinDivert is often flagged as RiskTool).
+
+          Скачайте ZapretA-$tag-windows-x64.zip, распакуйте и запустите ZapretA.exe. Ничего устанавливать не нужно; подробности в ПРОЧТИ_МЕНЯ.txt.
+
+          Early build: not yet verified on real filtered networks. SHA-256 of the exe and the archive are in SHA256SUMS.txt.
+          "@
+          gh release create $tag "ZapretA-$tag-windows-x64.zip" SHA256SUMS.txt --title "ZapretA $tag" --notes $notes --prerelease
+        shell: pwsh

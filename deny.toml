@@ -13,7 +13,11 @@ allow = [
     "CDLA-Permissive-2.0",
     "ISC",
     "MIT",
+    # egui's bundled default fonts (Ubuntu, Hack, Noto emoji) and their glyph data.
+    "OFL-1.1",
+    "Ubuntu-font-1.0",
     "Unicode-3.0",
+    "Zlib",
 ]
 
 [bans]

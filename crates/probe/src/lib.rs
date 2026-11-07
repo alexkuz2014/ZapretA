@@ -1,5 +1,7 @@
 //! Structured network probe results and conservative signal classification.
 
+pub mod select;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CheckStatus {
     Passed,
