@@ -1384,6 +1384,9 @@ dependencies = [
 [[package]]
 name = "zapreta-probe"
 version = "0.1.0"
+dependencies = [
+ "zapreta-core",
+]
 
 [[package]]
 name = "zerofrom"
