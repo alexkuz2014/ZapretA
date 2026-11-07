@@ -51,6 +51,7 @@ pub fn is_conflicting_process_name(name: &str) -> bool {
     )
 }
 
+#[cfg(any(target_os = "windows", test))]
 fn is_process_snapshot_complete(error: &io::Error) -> bool {
     // Win32 ERROR_NO_MORE_FILES is the documented end-of-enumeration result
     // for Process32FirstW/Process32NextW.
@@ -220,6 +221,7 @@ impl VerifiedEngine {
             use windows_sys::Win32::System::Threading::CREATE_SUSPENDED;
             command.creation_flags(CREATE_SUSPENDED);
         }
+        #[cfg_attr(not(target_os = "windows"), allow(unused_mut))]
         let mut child = command.spawn().map_err(|error| {
             EngineError(format!(
                 "cannot start verified engine {}: {error}",

@@ -45,7 +45,7 @@ The planned approach may use a Windows packet-filtering driver. Such a component
 
 ## License
 
-The project license has not been selected yet. Third-party components will retain their own license and attribution requirements.
+ZapretA is released under the [MIT License](LICENSE). Third-party components retain their own license and attribution requirements.
 
 ---
 

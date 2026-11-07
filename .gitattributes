@@ -1,0 +1,4 @@
+# Pinned upstream fixtures are hash-checked byte for byte; never normalize line endings.
+tests/fixtures/flowseal/* -text
+*.rs text eol=lf
+*.toml text eol=lf
