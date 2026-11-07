@@ -368,6 +368,12 @@ impl Drop for EngineProcess {
 #[cfg(target_os = "windows")]
 struct JobHandle(windows_sys::Win32::Foundation::HANDLE);
 
+// SAFETY: a Job Object HANDLE is a process-wide kernel handle value that is only
+// used for CloseHandle, which is valid from any thread; the type has no other
+// aliasing state.
+#[cfg(target_os = "windows")]
+unsafe impl Send for JobHandle {}
+
 #[cfg(target_os = "windows")]
 impl Drop for JobHandle {
     fn drop(&mut self) {
