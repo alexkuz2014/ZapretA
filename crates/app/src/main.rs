@@ -1,6 +1,10 @@
 use std::{env, path::PathBuf, process::ExitCode};
 
 mod autoselect;
+mod bundle;
+mod elevate;
+mod embedded;
+mod run;
 
 #[tokio::main]
 async fn main() -> ExitCode {
@@ -38,10 +42,12 @@ async fn main() -> ExitCode {
             )
             .await
         }
+        None => run::run().await,
+        Some(arg) if arg == "--run" => run::run().await,
         _ => {
-            println!("ZapretA — research build. Network engine is not configured yet.");
+            println!("ZapretA — research build. Run without arguments for the one-click mode.");
             println!(
-                "Use --version, --validate-catalog <catalog.toml>, --validate-source-catalog <snapshot.toml>, --diagnose, or --auto <winws.exe> <sha256> <snapshot-dir>."
+                "Use --version, --validate-catalog <catalog.toml>, --validate-source-catalog <snapshot.toml>, --diagnose, --run, or --auto <winws.exe> <sha256> <snapshot-dir>."
             );
             ExitCode::SUCCESS
         }
@@ -310,16 +316,9 @@ fn validate_source_catalog(path: PathBuf) -> ExitCode {
     }
 }
 
-struct Loaded {
-    id: String,
-    argv: Vec<String>,
-    covers_tcp: bool,
-    covers_udp: bool,
-}
-
 /// Loads every `*.toml` source snapshot in `dir` (sorted by name) as a runnable
 /// candidate. Coverage comes from literal `--filter-tcp=`/`--filter-udp=` flags.
-fn load_candidates(dir: &std::path::Path) -> Result<Vec<Loaded>, String> {
+fn load_candidates(dir: &std::path::Path) -> Result<Vec<autoselect::Loaded>, String> {
     let mut paths: Vec<PathBuf> = std::fs::read_dir(dir)
         .map_err(|error| format!("cannot read {}: {error}", dir.display()))?
         .filter_map(|entry| entry.ok().map(|entry| entry.path()))
@@ -330,31 +329,18 @@ fn load_candidates(dir: &std::path::Path) -> Result<Vec<Loaded>, String> {
     for path in paths {
         let input = std::fs::read_to_string(&path)
             .map_err(|error| format!("cannot read {}: {error}", path.display()))?;
-        let snapshot = zapreta_core::SourceStrategySnapshot::parse_toml(&input)
-            .map_err(|error| format!("{}: {error}", path.display()))?;
-        let strategy = zapreta_core::Strategy::from_source_snapshot(&snapshot)
-            .map_err(|error| format!("{}: {error}", path.display()))?;
-        let argv = zapreta_core::strategy_argv(&strategy);
-        let has = |prefix: &str| argv.iter().any(|token| token.starts_with(prefix));
-        let (tcp, udp) = (has("--filter-tcp="), has("--filter-udp="));
-        result.push(Loaded {
-            id: strategy.id,
-            argv,
-            covers_tcp: tcp,
-            covers_udp: udp,
-        });
+        result.push(
+            autoselect::parse_snapshot(&input)
+                .map_err(|error| format!("{}: {error}", path.display()))?,
+        );
     }
     Ok(result)
 }
 
 async fn auto_select(engine: PathBuf, sha256: String, dir: PathBuf) -> ExitCode {
     use std::collections::HashMap;
-    use zapreta_probe::{
-        CheckStatus, EndpointResult, classify,
-        select::{
-            Candidate, CandidateTester, CheckKind, SelectionConfig, SelectionOutcome, plan,
-            select_strategy,
-        },
+    use zapreta_probe::select::{
+        Candidate, SelectionConfig, SelectionOutcome, plan, select_strategy,
     };
 
     let verified = match zapreta_engine::EngineBundle::new(&engine, sha256).verify() {
@@ -401,28 +387,7 @@ async fn auto_select(engine: PathBuf, sha256: String, dir: PathBuf) -> ExitCode 
     // that), and an HTTPS error cannot be split into TCP vs TLS, so any error is
     // reported as a TCP-level signal; the plan treats all such signals alike.
     let joined = tokio::task::spawn_blocking(move || {
-        let control = tester.run_check("", CheckKind::Control).status;
-        let tls = tester.run_check("", CheckKind::Tls).status;
-        let content = if tls == CheckStatus::Passed {
-            if tester.run_check("", CheckKind::Content).kbps.is_some() {
-                CheckStatus::Passed
-            } else {
-                CheckStatus::Failed
-            }
-        } else {
-            CheckStatus::NotRun
-        };
-        let endpoint = |name: &str, tcp, tls, content| EndpointResult {
-            endpoint: name.to_owned(),
-            dns: CheckStatus::NotRun,
-            tcp,
-            tls,
-            content,
-        };
-        let signal = classify(
-            &endpoint("control", control, control, control),
-            &endpoint("target", tls, tls, content),
-        );
+        let signal = autoselect::baseline_signal(&mut tester, SelectionConfig::default().min_kbps);
         let search = plan(signal, &candidates, None);
         let report = select_strategy(&mut tester, &search, &SelectionConfig::default());
         (signal, report)

@@ -7,9 +7,35 @@ use tokio::runtime::Handle;
 use zapreta_engine::{EngineProcess, VerifiedEngine};
 use zapreta_net::{AllowedHost, HttpsProbeResult, HttpsProber, NetError, NetworkPurpose};
 use zapreta_probe::{
-    CheckStatus,
+    CheckStatus, EndpointResult, ProbeSignal, classify,
     select::{CandidateTester, CheckKind, CheckOutcome, TesterError},
 };
+
+/// A runnable candidate parsed from a pinned source snapshot. Coverage comes
+/// from literal `--filter-tcp=`/`--filter-udp=` flags in the argv.
+pub struct Loaded {
+    pub id: String,
+    pub label: String,
+    pub argv: Vec<String>,
+    pub covers_tcp: bool,
+    pub covers_udp: bool,
+}
+
+pub fn parse_snapshot(input: &str) -> Result<Loaded, String> {
+    let snapshot =
+        zapreta_core::SourceStrategySnapshot::parse_toml(input).map_err(|e| e.to_string())?;
+    let strategy =
+        zapreta_core::Strategy::from_source_snapshot(&snapshot).map_err(|e| e.to_string())?;
+    let argv = zapreta_core::strategy_argv(&strategy);
+    let has = |prefix: &str| argv.iter().any(|token| token.starts_with(prefix));
+    Ok(Loaded {
+        covers_tcp: has("--filter-tcp="),
+        covers_udp: has("--filter-udp="),
+        id: strategy.id,
+        label: strategy.label,
+        argv,
+    })
+}
 
 /// One HTTPS target of the per-candidate suite.
 #[derive(Debug, Clone)]
@@ -71,6 +97,35 @@ pub fn content_outcome(result: &Result<HttpsProbeResult, NetError>) -> CheckOutc
         }
         _ => CheckOutcome::with_status(CheckStatus::Failed),
     }
+}
+
+/// Baseline without any bypass active. DNS is not compared here, and an HTTPS
+/// error cannot be split into TCP vs TLS, so any error is reported as a
+/// TCP-level signal; the search plan treats all such signals alike. Content
+/// slower than `min_kbps` counts as failed, because throttling is the common
+/// failure mode.
+pub fn baseline_signal<T: CandidateTester>(tester: &mut T, min_kbps: u32) -> ProbeSignal {
+    let control = tester.run_check("", CheckKind::Control).status;
+    let tls = tester.run_check("", CheckKind::Tls).status;
+    let content = if tls == CheckStatus::Passed {
+        match tester.run_check("", CheckKind::Content).kbps {
+            Some(kbps) if kbps >= min_kbps => CheckStatus::Passed,
+            _ => CheckStatus::Failed,
+        }
+    } else {
+        CheckStatus::NotRun
+    };
+    let endpoint = |name: &str, transport, content| EndpointResult {
+        endpoint: name.to_owned(),
+        dns: CheckStatus::NotRun,
+        tcp: transport,
+        tls: transport,
+        content,
+    };
+    classify(
+        &endpoint("control", control, control),
+        &endpoint("target", tls, content),
+    )
 }
 
 pub struct LiveTester {

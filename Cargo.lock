@@ -1348,7 +1348,9 @@ dependencies = [
 name = "zapreta"
 version = "0.1.0"
 dependencies = [
+ "sha2",
  "tokio",
+ "windows-sys 0.61.2",
  "zapreta-core",
  "zapreta-engine",
  "zapreta-net",

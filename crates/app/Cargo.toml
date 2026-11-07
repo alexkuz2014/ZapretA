@@ -12,6 +12,11 @@ zapreta-net = { version = "0.1.0", path = "../net" }
 zapreta-probe = { version = "0.1.0", path = "../probe" }
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 
+sha2 = "0.10"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_System_Threading", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging"] }
+
 [[bin]]
 name = "zapreta"
 path = "src/main.rs"

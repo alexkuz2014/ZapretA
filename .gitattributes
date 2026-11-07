@@ -2,3 +2,5 @@
 tests/fixtures/flowseal/* -text
 *.rs text eol=lf
 *.toml text eol=lf
+# Embedded third-party engine files are hash-pinned; keep them byte for byte.
+crates/app/assets/engine/** -text
