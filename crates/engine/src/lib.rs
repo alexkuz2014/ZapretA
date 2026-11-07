@@ -51,6 +51,7 @@ pub fn is_conflicting_process_name(name: &str) -> bool {
     )
 }
 
+#[cfg(any(target_os = "windows", test))]
 fn is_process_snapshot_complete(error: &io::Error) -> bool {
     // Win32 ERROR_NO_MORE_FILES is the documented end-of-enumeration result
     // for Process32FirstW/Process32NextW.
@@ -217,9 +218,12 @@ impl VerifiedEngine {
         #[cfg(target_os = "windows")]
         {
             use std::os::windows::process::CommandExt;
-            use windows_sys::Win32::System::Threading::CREATE_SUSPENDED;
-            command.creation_flags(CREATE_SUSPENDED);
+            use windows_sys::Win32::System::Threading::{CREATE_NO_WINDOW, CREATE_SUSPENDED};
+            // CREATE_NO_WINDOW keeps the console engine from opening a window
+            // when launched from the GUI process.
+            command.creation_flags(CREATE_SUSPENDED | CREATE_NO_WINDOW);
         }
+        #[cfg_attr(not(target_os = "windows"), allow(unused_mut))]
         let mut child = command.spawn().map_err(|error| {
             EngineError(format!(
                 "cannot start verified engine {}: {error}",
@@ -365,6 +369,12 @@ impl Drop for EngineProcess {
 
 #[cfg(target_os = "windows")]
 struct JobHandle(windows_sys::Win32::Foundation::HANDLE);
+
+// SAFETY: a Job Object HANDLE is a process-wide kernel handle value that is only
+// used for CloseHandle, which is valid from any thread; the type has no other
+// aliasing state.
+#[cfg(target_os = "windows")]
+unsafe impl Send for JobHandle {}
 
 #[cfg(target_os = "windows")]
 impl Drop for JobHandle {

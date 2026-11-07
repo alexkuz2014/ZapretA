@@ -1,7 +1,73 @@
+// GUI-subsystem exe on Windows: no console window when started from Explorer.
+#![cfg_attr(windows, windows_subsystem = "windows")]
+
 use std::{env, path::PathBuf, process::ExitCode};
 
-#[tokio::main]
-async fn main() -> ExitCode {
+#[cfg_attr(not(windows), allow(dead_code, unused_imports))]
+mod autoselect;
+#[cfg_attr(not(windows), allow(dead_code, unused_imports))]
+mod bundle;
+#[cfg_attr(not(windows), allow(dead_code, unused_imports))]
+mod controller;
+#[cfg_attr(not(windows), allow(dead_code, unused_imports))]
+mod elevate;
+#[cfg_attr(not(windows), allow(dead_code, unused_imports))]
+mod embedded;
+#[cfg_attr(not(windows), allow(dead_code, unused_imports))]
+mod generated;
+#[cfg(windows)]
+mod gui;
+#[cfg_attr(not(windows), allow(dead_code, unused_imports))]
+mod lists;
+#[cfg_attr(not(windows), allow(dead_code, unused_imports))]
+mod settings;
+#[cfg(windows)]
+mod winutil;
+
+fn main() -> ExitCode {
+    let first = env::args_os().nth(1);
+    let gui_mode = match first.as_deref() {
+        None => Some(false),
+        Some(arg) if arg == "--tray" => Some(true),
+        _ => None,
+    };
+    if let Some(start_hidden) = gui_mode {
+        return run_gui(start_hidden);
+    }
+    #[cfg(windows)]
+    winutil::attach_parent_console();
+    let runtime = match tokio::runtime::Runtime::new() {
+        Ok(runtime) => runtime,
+        Err(error) => {
+            eprintln!("cannot start async runtime: {error}");
+            return ExitCode::FAILURE;
+        }
+    };
+    runtime.block_on(cli())
+}
+
+#[cfg(windows)]
+fn run_gui(start_hidden: bool) -> ExitCode {
+    if !elevate::is_elevated() {
+        let args = if start_hidden { "--tray" } else { "" };
+        if elevate::relaunch_elevated(args) {
+            return ExitCode::SUCCESS;
+        }
+        winutil::message_box(
+            "ZapretA нужны права администратора: без них Windows не даёт менять сетевые пакеты.",
+        );
+        return ExitCode::FAILURE;
+    }
+    gui::run(start_hidden)
+}
+
+#[cfg(not(windows))]
+fn run_gui(_start_hidden: bool) -> ExitCode {
+    println!("ZapretA: the window and engine run on Windows only. CLI: --help");
+    ExitCode::SUCCESS
+}
+
+async fn cli() -> ExitCode {
     let mut args = env::args_os().skip(1);
     match args.next().as_deref() {
         Some(arg) if arg == "--version" => {
@@ -23,10 +89,26 @@ async fn main() -> ExitCode {
             validate_source_catalog(PathBuf::from(path))
         }
         Some(arg) if arg == "--diagnose" => diagnose().await,
+        Some(arg) if arg == "--auto" => {
+            let (Some(engine), Some(sha256), Some(dir)) = (args.next(), args.next(), args.next())
+            else {
+                eprintln!("Usage: zapreta --auto <winws.exe> <engine-sha256> <snapshot-dir>");
+                return ExitCode::from(2);
+            };
+            auto_select(
+                PathBuf::from(engine),
+                sha256.to_string_lossy().into_owned(),
+                PathBuf::from(dir),
+            )
+            .await
+        }
         _ => {
-            println!("ZapretA — research build. Network engine is not configured yet.");
+            println!("ZapretA {}", env!("CARGO_PKG_VERSION"));
             println!(
-                "Use --version, --validate-catalog <catalog.toml>, --validate-source-catalog <snapshot.toml>, or --diagnose."
+                "Without arguments: window + tray (Windows). --tray: start hidden in the tray."
+            );
+            println!(
+                "CLI: --version, --diagnose, --validate-catalog <catalog.toml>, --validate-source-catalog <snapshot.toml>, --auto <winws.exe> <sha256> <snapshot-dir>."
             );
             ExitCode::SUCCESS
         }
@@ -292,5 +374,116 @@ fn validate_source_catalog(path: PathBuf) -> ExitCode {
             eprintln!("Source snapshot error: {error}");
             ExitCode::FAILURE
         }
+    }
+}
+
+/// Loads every `*.toml` source snapshot in `dir` (sorted by name) as a runnable
+/// candidate. Coverage comes from literal `--filter-tcp=`/`--filter-udp=` flags.
+fn load_candidates(dir: &std::path::Path) -> Result<Vec<autoselect::Loaded>, String> {
+    let mut paths: Vec<PathBuf> = std::fs::read_dir(dir)
+        .map_err(|error| format!("cannot read {}: {error}", dir.display()))?
+        .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+        .filter(|path| path.extension().is_some_and(|ext| ext == "toml"))
+        .collect();
+    paths.sort();
+    let mut result = Vec::new();
+    for path in paths {
+        let input = std::fs::read_to_string(&path)
+            .map_err(|error| format!("cannot read {}: {error}", path.display()))?;
+        result.push(
+            autoselect::parse_snapshot(&input)
+                .map_err(|error| format!("{}: {error}", path.display()))?,
+        );
+    }
+    Ok(result)
+}
+
+async fn auto_select(engine: PathBuf, sha256: String, dir: PathBuf) -> ExitCode {
+    use std::collections::HashMap;
+    use zapreta_probe::select::{
+        Candidate, SelectionConfig, SelectionOutcome, plan, select_strategy,
+    };
+
+    let verified = match zapreta_engine::EngineBundle::new(&engine, sha256).verify() {
+        Ok(verified) => verified,
+        Err(error) => {
+            eprintln!("Движок не прошёл проверку SHA-256: {error}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let loaded = match load_candidates(&dir) {
+        Ok(loaded) => loaded,
+        Err(error) => {
+            eprintln!("Каталог стратегий: {error}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let suite = autoselect::Suite::default();
+    let handle = tokio::runtime::Handle::current();
+    let mut tester = match autoselect::LiveTester::new(
+        handle,
+        verified,
+        loaded
+            .iter()
+            .map(|item| (item.id.clone(), item.argv.clone()))
+            .collect::<HashMap<_, _>>(),
+        suite,
+    ) {
+        Ok(tester) => tester,
+        Err(error) => {
+            eprintln!("Не удалось запустить HTTPS-проверку: {error}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let candidates: Vec<Candidate> = loaded
+        .iter()
+        .map(|item| Candidate {
+            id: item.id.clone(),
+            covers_tcp: item.covers_tcp,
+            covers_udp: item.covers_udp,
+        })
+        .collect();
+
+    // Baseline without a bypass. DNS is not compared here (run --diagnose for
+    // that), and an HTTPS error cannot be split into TCP vs TLS, so any error is
+    // reported as a TCP-level signal; the plan treats all such signals alike.
+    let joined = tokio::task::spawn_blocking(move || {
+        let signal = autoselect::baseline_signal(&mut tester, SelectionConfig::default().min_kbps);
+        let search = plan(signal, &candidates, None);
+        let report = select_strategy(&mut tester, &search, &SelectionConfig::default());
+        (signal, report)
+    })
+    .await;
+    let Ok((signal, report)) = joined else {
+        eprintln!("Внутренняя ошибка при подборе.");
+        return ExitCode::FAILURE;
+    };
+    println!("Сигнал baseline: {signal:?}");
+    for candidate in &report.candidates {
+        println!("  {}: {:?}", candidate.id, candidate.status);
+    }
+    match report.outcome {
+        SelectionOutcome::Selected { id, points } => {
+            println!("Подходит стратегия {id} ({points} баллов). Она не оставлена запущенной.");
+            ExitCode::SUCCESS
+        }
+        other => {
+            println!("Победитель не выбран: {other:?}");
+            ExitCode::from(1)
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn loads_all_pinned_flowseal_snapshots_as_candidates() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../catalog/flowseal");
+        let loaded = load_candidates(&dir).unwrap();
+        assert_eq!(loaded.len(), 22);
+        assert!(loaded.iter().all(|item| !item.argv.is_empty()));
+        assert!(loaded.iter().any(|item| item.covers_tcp));
     }
 }

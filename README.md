@@ -2,9 +2,11 @@
 
 [English](README.md) | [Русский](README_RU.md)
 
-**Automatically diagnose and improve access to websites affected by network filtering.** ZapretA is a planned portable Windows application written in Rust. It will test network connectivity, try a verified traffic-handling strategy, and report whether the connection improves.
+**Automatically diagnose and improve access to websites affected by network filtering.** ZapretA is a portable Windows application written in Rust: one exe with an embedded, hash-pinned engine (zapret `winws` + WinDivert), automatic strategy selection, a window, a tray icon and background operation.
 
-> **Project status: early development.** The Rust workspace, catalog validation, engine process boundary, and an initial manual DNS/HTTPS diagnostic (`--diagnose`) are in place. There is no bundled engine, automatic strategy selection, tray UI, or release build yet.
+> **Project status: early, untested on real filtered networks.** The app builds, its logic is unit-tested and the window was smoke-tested under Wine, but the engine/driver path and strategy search have not yet been verified on Windows behind real DPI. See [Architecture](docs/ARCHITECTURE.md) for what is and is not verified.
+
+Double-click `ZapretA.exe`, accept the UAC prompt, press **Включить**. It tries the 22 Flowseal profiles, then 29 own variants derived from zapret's `blockcheck.sh`, keeps the first one that passes the checks, and re-selects if access degrades. Own sites, IP addresses and exclusions are edited in the window. Embedded third-party files and hashes: [SBOM](docs/SBOM.md), [notices](docs/THIRD_PARTY_NOTICES.md).
 
 ## What ZapretA aims to do
 
@@ -26,8 +28,9 @@ The current `--diagnose` command directly queries the configured system DNS reso
 - [x] Approve and start the Rust workspace architecture.
 - [x] Build the Rust workspace, catalog validator, and engine process boundary.
 - [x] Add initial manual system DNS, bootstrapped Google/Cloudflare DoH fallback, and HTTPS checks.
-- [ ] Classify probe signals and implement sequential strategy selection.
-- [ ] Add tray status, safe cleanup, and diagnostics.
+- [x] Classify probe signals and implement sequential strategy selection.
+- [x] Add window, tray status, background watchdog, custom lists and autostart.
+- [ ] Verify on Windows behind real DPI; signed CI release build.
 - [x] Add Windows MSVC CI, dependency policy checks, and a checksummed CI artifact.
 - [ ] Publish a reviewed and verified release.
 
@@ -45,7 +48,7 @@ The planned approach may use a Windows packet-filtering driver. Such a component
 
 ## License
 
-The project license has not been selected yet. Third-party components will retain their own license and attribution requirements.
+ZapretA is released under the [MIT License](LICENSE). Third-party components retain their own license and attribution requirements.
 
 ---
 
