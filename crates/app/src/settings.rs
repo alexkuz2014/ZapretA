@@ -12,8 +12,11 @@ pub struct Settings {
     pub minimize_to_tray: bool,
     /// Periodically re-check access and re-select on degradation.
     pub watchdog: bool,
-    /// Include the user's own sites in the strategy test suite.
+    /// Judge each of the user's own sites as a separate search goal.
     pub test_user_sites: bool,
+    /// Use DoH addresses (via the hosts file) for user sites whose system DNS
+    /// answer looks spoofed or missing.
+    pub fix_dns: bool,
     /// Last strategy that passed, tried first next time.
     pub last_strategy: Option<String>,
     /// Engine bundle the cached strategy was validated with.
@@ -27,6 +30,7 @@ impl Default for Settings {
             minimize_to_tray: true,
             watchdog: true,
             test_user_sites: true,
+            fix_dns: true,
             last_strategy: None,
             last_engine: None,
         }

@@ -10,6 +10,8 @@ mod bundle;
 #[cfg_attr(not(windows), allow(dead_code, unused_imports))]
 mod controller;
 #[cfg_attr(not(windows), allow(dead_code, unused_imports))]
+mod dnsfix;
+#[cfg_attr(not(windows), allow(dead_code, unused_imports))]
 mod elevate;
 #[cfg_attr(not(windows), allow(dead_code, unused_imports))]
 mod embedded;
@@ -19,6 +21,8 @@ mod generated;
 mod gui;
 #[cfg_attr(not(windows), allow(dead_code, unused_imports))]
 mod lists;
+#[cfg_attr(not(windows), allow(dead_code, unused_imports))]
+mod search;
 #[cfg_attr(not(windows), allow(dead_code, unused_imports))]
 mod settings;
 #[cfg(windows)]

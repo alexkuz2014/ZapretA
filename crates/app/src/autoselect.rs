@@ -72,9 +72,6 @@ pub struct Suite {
     pub content: Vec<Target>,
 }
 
-/// User sites added to the TLS check, so a strategy that breaks them loses.
-pub const MAX_USER_TARGETS: usize = 3;
-
 impl Default for Suite {
     fn default() -> Self {
         Self {
@@ -103,12 +100,35 @@ impl Default for Suite {
     }
 }
 
-impl Suite {
-    pub fn with_user_sites(mut self, sites: &[String]) -> Self {
-        for site in sites.iter().take(MAX_USER_TARGETS) {
-            self.tls.push(Target::new(site, "/", 16 * 1024));
+/// One independently judged goal of the search: YouTube, or one user site.
+#[derive(Debug, Clone)]
+pub struct TargetGroup {
+    pub name: String,
+    /// (target, is_content_check). Transport checks pass on any HTTP answer;
+    /// content checks need a 2xx and at least `min_kbps`.
+    pub checks: Vec<(Target, bool)>,
+}
+
+impl TargetGroup {
+    pub fn youtube() -> Self {
+        let suite = Suite::default();
+        let mut checks: Vec<(Target, bool)> = suite
+            .tls
+            .into_iter()
+            .map(|target| (target, false))
+            .collect();
+        checks.extend(suite.content.into_iter().map(|target| (target, true)));
+        Self {
+            name: "YouTube".into(),
+            checks,
         }
-        self
+    }
+
+    pub fn site(host: &str) -> Self {
+        Self {
+            name: host.to_owned(),
+            checks: vec![(Target::new(host, "/", 16 * 1024), false)],
+        }
     }
 }
 
@@ -186,6 +206,9 @@ pub fn baseline_signal<T: CandidateTester>(tester: &mut T, min_kbps: u32) -> Pro
 pub struct LiveTester {
     handle: Handle,
     prober: HttpsProber,
+    timeout: Duration,
+    groups: Vec<TargetGroup>,
+    min_kbps: u32,
     engine: VerifiedEngine,
     argv: HashMap<String, Vec<String>>,
     suite: Suite,
@@ -205,6 +228,9 @@ impl LiveTester {
         Ok(Self {
             handle,
             prober: HttpsProber::new(Duration::from_secs(6))?,
+            timeout: Duration::from_secs(6),
+            groups: vec![TargetGroup::youtube()],
+            min_kbps: 500,
             engine,
             argv,
             suite,
@@ -222,8 +248,72 @@ impl LiveTester {
         self.cancel = cancel;
     }
 
-    pub fn set_suite(&mut self, suite: Suite) {
-        self.suite = suite;
+    pub fn set_groups(&mut self, groups: Vec<TargetGroup>) {
+        self.groups = groups;
+    }
+
+    pub fn groups(&self) -> &[TargetGroup] {
+        &self.groups
+    }
+
+    /// Connect to these addresses (e.g. DoH answers) instead of resolving.
+    pub fn set_overrides(&mut self, overrides: &[(String, Vec<std::net::IpAddr>)]) {
+        if let Ok(prober) = HttpsProber::with_overrides(self.timeout, overrides) {
+            self.prober = prober;
+        }
+    }
+
+    pub fn control_ok(&self) -> bool {
+        self.check(&self.suite.control, false, true).status == CheckStatus::Passed
+    }
+
+    pub fn group_ok(&self, index: usize) -> bool {
+        let Some(group) = self.groups.get(index) else {
+            return false;
+        };
+        group.checks.iter().all(|(target, content)| {
+            if self.cancelled() {
+                return false;
+            }
+            let result = self.fetch(target);
+            if *content {
+                content_outcome(&result)
+                    .kbps
+                    .is_some_and(|kbps| kbps >= self.min_kbps)
+            } else {
+                transport_outcome(&result).status == CheckStatus::Passed
+            }
+        })
+    }
+
+    /// Starts a candidate for the multi-target search: a spawn error means the
+    /// engine cannot run at all; an immediate exit is specific to the candidate.
+    pub fn start_for_search(&mut self, id: &str) -> Result<(), crate::search::StartError> {
+        use crate::search::StartError;
+        if self.cancelled() {
+            return Err(StartError::Fatal("cancelled".into()));
+        }
+        let argv = self
+            .argv
+            .get(id)
+            .ok_or_else(|| StartError::Fatal(format!("unknown strategy {id}")))?;
+        let process = self
+            .engine
+            .spawn(argv)
+            .map_err(|error| StartError::Fatal(error.to_string()))?;
+        self.process = Some(process);
+        self.running = Some(id.to_owned());
+        std::thread::sleep(self.warmup);
+        let exited = self.process.as_mut().is_some_and(|p| p.has_exited());
+        if exited {
+            let _ = CandidateTester::stop(self, id);
+            return Err(StartError::Exited);
+        }
+        Ok(())
+    }
+
+    pub fn is_cancelled(&self) -> bool {
+        self.cancelled()
     }
 
     pub fn running(&self) -> Option<&str> {
@@ -325,16 +415,6 @@ mod tests {
         assert_eq!(combine(&[], false).status, CheckStatus::Failed);
         let speeds = [CheckOutcome::content(900), CheckOutcome::content(300)];
         assert_eq!(combine(&speeds, false).kbps, Some(300));
-    }
-
-    #[test]
-    fn user_sites_are_capped_in_the_tls_check() {
-        let sites: Vec<String> = (0..5).map(|i| format!("s{i}.example")).collect();
-        let suite = Suite::default().with_user_sites(&sites);
-        assert_eq!(
-            suite.tls.len(),
-            Suite::default().tls.len() + MAX_USER_TARGETS
-        );
     }
 
     #[test]

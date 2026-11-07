@@ -339,6 +339,15 @@ impl EngineProcess {
         self.child.as_ref().map(Child::id)
     }
 
+    /// True if the engine process already terminated (for example because the
+    /// driver failed to load or it rejected its arguments).
+    pub fn has_exited(&mut self) -> bool {
+        match self.child.as_mut() {
+            Some(child) => !matches!(child.try_wait(), Ok(None)),
+            None => true,
+        }
+    }
+
     pub fn stop(&mut self) -> Result<(), EngineError> {
         let Some(mut child) = self.child.take() else {
             return Ok(());

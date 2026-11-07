@@ -2,7 +2,7 @@
 //! sends commands and draws snapshots.
 
 use crate::{
-    controller::{Command, Controller, Paths, Phase, Snapshot, describe_signal},
+    controller::{Command, Controller, Paths, Phase, Snapshot},
     embedded::ENGINE_ID,
     lists::{self, ListKind},
     settings::Settings,
@@ -69,6 +69,8 @@ struct App {
     tray_state: Option<TrayState>,
     quitting: bool,
     toggle_item: Option<MenuItem>,
+    new_site: String,
+    new_site_message: Option<(bool, String)>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -218,8 +220,10 @@ impl App {
             snapshot: Snapshot {
                 phase: Phase::Off,
                 log: Vec::new(),
-                baseline: None,
+                goals: Vec::new(),
             },
+            new_site: String::new(),
+            new_site_message: None,
             tray,
             tray_rx,
             tray_state: None,
@@ -305,8 +309,24 @@ impl App {
             }
             _ => {}
         }
-        if let Some(signal) = self.snapshot.baseline {
-            ui.label(RichText::new(format!("Сеть без обхода: {}", describe_signal(signal))).weak());
+        if !self.snapshot.goals.is_empty() {
+            ui.add_space(4.0);
+            for goal in &self.snapshot.goals {
+                let mark = |value: Option<bool>| match value {
+                    Some(true) => ("✓", Color32::from_rgb(40, 170, 90)),
+                    Some(false) => ("✗", Color32::from_rgb(210, 60, 60)),
+                    None => ("·", Color32::GRAY),
+                };
+                ui.horizontal(|ui| {
+                    let (before, before_color) = mark(goal.before);
+                    let (now, now_color) = mark(goal.now);
+                    ui.label(RichText::new(&goal.name).strong());
+                    ui.label(RichText::new("без обхода").weak());
+                    ui.label(RichText::new(before).color(before_color));
+                    ui.label(RichText::new("с обходом").weak());
+                    ui.label(RichText::new(now).color(now_color));
+                });
+            }
         }
         ui.add_space(8.0);
         ui.horizontal(|ui| {
@@ -340,7 +360,72 @@ impl App {
         });
     }
 
+    fn add_site(&mut self) {
+        match lists::parse(ListKind::Sites, &self.new_site) {
+            Ok(entries) if !entries.is_empty() => {
+                let mut current = lists::read(&self.engine_root, ListKind::Sites);
+                let mut added = Vec::new();
+                for entry in entries {
+                    if !current.contains(&entry) {
+                        current.insert(0, entry.clone());
+                        added.push(entry);
+                    }
+                }
+                match lists::write(&self.engine_root, ListKind::Sites, &current) {
+                    Ok(()) => {
+                        self.editors[0] = ListEditor::load(ListKind::Sites, &self.engine_root);
+                        self.new_site.clear();
+                        self.new_site_message = Some((
+                            true,
+                            if added.is_empty() {
+                                "Сайт уже в списке. Подбираю стратегию заново.".into()
+                            } else {
+                                format!(
+                                    "Добавлено: {}. Подбираю стратегию заново.",
+                                    added.join(", ")
+                                )
+                            },
+                        ));
+                        self.controller.send(Command::Research);
+                    }
+                    Err(error) => {
+                        self.new_site_message =
+                            Some((false, format!("Не удалось сохранить: {error}")))
+                    }
+                }
+            }
+            Ok(_) => self.new_site_message = Some((false, "Введите адрес сайта.".into())),
+            Err(_) => {
+                self.new_site_message = Some((
+                    false,
+                    "Не похоже на адрес сайта. Пример: rutracker.org".into(),
+                ))
+            }
+        }
+    }
+
     fn home(&mut self, ui: &mut egui::Ui) {
+        ui.label(RichText::new("Нужен конкретный сайт?").strong());
+        ui.horizontal(|ui| {
+            let response = ui.add(
+                egui::TextEdit::singleline(&mut self.new_site)
+                    .hint_text("например, rutracker.org")
+                    .desired_width(260.0),
+            );
+            let enter = response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+            if ui.button("Добавить и подобрать").clicked() || enter {
+                self.add_site();
+            }
+        });
+        if let Some((ok, message)) = &self.new_site_message {
+            let color = if *ok {
+                Color32::from_rgb(40, 170, 90)
+            } else {
+                Color32::from_rgb(210, 60, 60)
+            };
+            ui.label(RichText::new(message).color(color));
+        }
+        ui.add_space(10.0);
         ui.label(
             "ZapretA сам подбирает способ обхода замедления и блокировок: сначала 22 проверенных \
              профиля Flowseal, затем 29 собственных вариантов по методике blockcheck. \
@@ -349,7 +434,8 @@ impl App {
         ui.add_space(6.0);
         ui.label(
             "Обход действует для YouTube, Discord и сайтов из вкладок «Сайты» и «IP-адреса». \
-             Пока программа работает (значок в трее у часов), обход включён.",
+             Для своих сайтов программа также обходит подмену DNS. Пока программа работает \
+             (значок в трее у часов), обход включён.",
         );
         ui.add_space(6.0);
         ui.label(
@@ -445,7 +531,13 @@ impl App {
         changed |= ui
             .checkbox(
                 &mut self.settings.test_user_sites,
-                "Проверять мои сайты при подборе (первые три из списка)",
+                "Подбирать стратегию и под мои сайты (первые шесть из списка)",
+            )
+            .changed();
+        changed |= ui
+            .checkbox(
+                &mut self.settings.fix_dns,
+                "Исправлять подменённый DNS для моих сайтов (адреса из DoH в файле hosts, убираются при выключении)",
             )
             .changed();
         if changed {
