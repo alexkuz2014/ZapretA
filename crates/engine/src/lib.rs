@@ -218,8 +218,10 @@ impl VerifiedEngine {
         #[cfg(target_os = "windows")]
         {
             use std::os::windows::process::CommandExt;
-            use windows_sys::Win32::System::Threading::CREATE_SUSPENDED;
-            command.creation_flags(CREATE_SUSPENDED);
+            use windows_sys::Win32::System::Threading::{CREATE_NO_WINDOW, CREATE_SUSPENDED};
+            // CREATE_NO_WINDOW keeps the console engine from opening a window
+            // when launched from the GUI process.
+            command.creation_flags(CREATE_SUSPENDED | CREATE_NO_WINDOW);
         }
         #[cfg_attr(not(target_os = "windows"), allow(unused_mut))]
         let mut child = command.spawn().map_err(|error| {

@@ -2,7 +2,14 @@
 //! and HTTPS client. Mapping helpers are pure and unit-tested; `LiveTester`
 //! itself needs a verified engine binary and is exercised only on Windows.
 
-use std::{collections::HashMap, time::Duration};
+use std::{
+    collections::HashMap,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+    time::Duration,
+};
 use tokio::runtime::Handle;
 use zapreta_engine::{EngineProcess, VerifiedEngine};
 use zapreta_net::{AllowedHost, HttpsProbeResult, HttpsProber, NetError, NetworkPurpose};
@@ -38,41 +45,70 @@ pub fn parse_snapshot(input: &str) -> Result<Loaded, String> {
 }
 
 /// One HTTPS target of the per-candidate suite.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Target {
-    pub host: &'static str,
-    pub path: &'static str,
+    pub host: String,
+    pub path: String,
     pub max_bytes: usize,
 }
 
+impl Target {
+    pub fn new(host: &str, path: &str, max_bytes: usize) -> Self {
+        Self {
+            host: host.to_owned(),
+            path: path.to_owned(),
+            max_bytes,
+        }
+    }
+}
+
+/// Targets per check. Control passes if any target answers; TLS needs every
+/// target to answer; content needs a 2xx from every target and reports the
+/// slowest throughput.
 #[derive(Debug, Clone)]
 pub struct Suite {
-    pub control: Target,
-    pub tls: Target,
-    /// Stand-in for a video chunk: a bounded read from the target site. Real
-    /// video-CDN URLs are dynamic and are still an open question.
-    pub content: Target,
+    pub control: Vec<Target>,
+    pub tls: Vec<Target>,
+    pub content: Vec<Target>,
 }
+
+/// User sites added to the TLS check, so a strategy that breaks them loses.
+pub const MAX_USER_TARGETS: usize = 3;
 
 impl Default for Suite {
     fn default() -> Self {
         Self {
-            control: Target {
-                host: "example.com",
-                path: "/",
-                max_bytes: 16 * 1024,
-            },
-            tls: Target {
-                host: "www.youtube.com",
-                path: "/generate_204",
-                max_bytes: 16 * 1024,
-            },
-            content: Target {
-                host: "www.youtube.com",
-                path: "/",
-                max_bytes: 256 * 1024,
-            },
+            control: vec![
+                Target::new("example.com", "/", 16 * 1024),
+                Target::new("www.microsoft.com", "/", 16 * 1024),
+            ],
+            tls: vec![
+                Target::new("www.youtube.com", "/generate_204", 16 * 1024),
+                // Video traffic is served from googlevideo.com; its SNI is the
+                // one throttled or dropped when the page itself still loads.
+                Target::new(
+                    "redirector.googlevideo.com",
+                    "/report_mapping?di=no",
+                    16 * 1024,
+                ),
+            ],
+            // Bounded reads standing in for a video chunk: the page and a
+            // thumbnail from the image CDN. Volume-based throttling shows up as
+            // a stall or low throughput here.
+            content: vec![
+                Target::new("www.youtube.com", "/", 256 * 1024),
+                Target::new("i.ytimg.com", "/vi/dQw4w9WgXcQ/hqdefault.jpg", 256 * 1024),
+            ],
         }
+    }
+}
+
+impl Suite {
+    pub fn with_user_sites(mut self, sites: &[String]) -> Self {
+        for site in sites.iter().take(MAX_USER_TARGETS) {
+            self.tls.push(Target::new(site, "/", 16 * 1024));
+        }
+        self
     }
 }
 
@@ -96,6 +132,25 @@ pub fn content_outcome(result: &Result<HttpsProbeResult, NetError>) -> CheckOutc
             CheckOutcome::content(u32::try_from(kbps).unwrap_or(u32::MAX))
         }
         _ => CheckOutcome::with_status(CheckStatus::Failed),
+    }
+}
+
+/// Combines per-target outcomes: `any` for control, otherwise all must pass.
+/// The combined throughput is the slowest target's.
+pub fn combine(outcomes: &[CheckOutcome], any: bool) -> CheckOutcome {
+    let passed = |o: &CheckOutcome| o.status == CheckStatus::Passed;
+    let ok = if any {
+        outcomes.iter().any(passed)
+    } else {
+        !outcomes.is_empty() && outcomes.iter().all(passed)
+    };
+    if !ok {
+        return CheckOutcome::with_status(CheckStatus::Failed);
+    }
+    let kbps = outcomes.iter().filter_map(|o| o.kbps).min();
+    CheckOutcome {
+        status: CheckStatus::Passed,
+        kbps,
     }
 }
 
@@ -136,6 +191,8 @@ pub struct LiveTester {
     suite: Suite,
     warmup: Duration,
     process: Option<EngineProcess>,
+    running: Option<String>,
+    cancel: Arc<AtomicBool>,
 }
 
 impl LiveTester {
@@ -147,26 +204,71 @@ impl LiveTester {
     ) -> Result<Self, NetError> {
         Ok(Self {
             handle,
-            prober: HttpsProber::new(Duration::from_secs(8))?,
+            prober: HttpsProber::new(Duration::from_secs(6))?,
             engine,
             argv,
             suite,
             // Assumption: winws needs about this long to install its filter.
             warmup: Duration::from_millis(1500),
             process: None,
+            running: None,
+            cancel: Arc::new(AtomicBool::new(false)),
         })
     }
 
+    /// While the flag is set, starts fail and checks report failure, so a
+    /// running search drains quickly.
+    pub fn set_cancel_flag(&mut self, cancel: Arc<AtomicBool>) {
+        self.cancel = cancel;
+    }
+
+    pub fn set_suite(&mut self, suite: Suite) {
+        self.suite = suite;
+    }
+
+    pub fn running(&self) -> Option<&str> {
+        self.running.as_deref()
+    }
+
+    fn cancelled(&self) -> bool {
+        self.cancel.load(Ordering::SeqCst)
+    }
+
     fn fetch(&self, target: &Target) -> Result<HttpsProbeResult, NetError> {
-        let host = AllowedHost::new(target.host, NetworkPurpose::Probe)
+        let host = AllowedHost::new(&target.host, NetworkPurpose::Probe)
             .map_err(|error| NetError(error.to_string()))?;
         self.handle
-            .block_on(self.prober.get(&host, target.path, target.max_bytes))
+            .block_on(self.prober.get(&host, &target.path, target.max_bytes))
+    }
+
+    fn check(&self, targets: &[Target], content: bool, any: bool) -> CheckOutcome {
+        let mut outcomes = Vec::new();
+        for target in targets {
+            if self.cancelled() {
+                return CheckOutcome::with_status(CheckStatus::Failed);
+            }
+            let result = self.fetch(target);
+            let outcome = if content {
+                content_outcome(&result)
+            } else {
+                transport_outcome(&result)
+            };
+            let passed = outcome.status == CheckStatus::Passed;
+            outcomes.push(outcome);
+            // Short-circuit: one pass decides `any`, one failure decides `all`.
+            if any == passed {
+                break;
+            }
+        }
+        combine(&outcomes, any)
     }
 }
 
 impl CandidateTester for LiveTester {
     fn start(&mut self, id: &str) -> Result<(), TesterError> {
+        if self.cancelled() {
+            return Err(TesterError("cancelled".into()));
+        }
         let argv = self
             .argv
             .get(id)
@@ -176,19 +278,21 @@ impl CandidateTester for LiveTester {
             .spawn(argv)
             .map_err(|error| TesterError(error.to_string()))?;
         self.process = Some(process);
+        self.running = Some(id.to_owned());
         std::thread::sleep(self.warmup);
         Ok(())
     }
 
     fn run_check(&mut self, _id: &str, kind: CheckKind) -> CheckOutcome {
         match kind {
-            CheckKind::Control => transport_outcome(&self.fetch(&self.suite.control)),
-            CheckKind::Tls => transport_outcome(&self.fetch(&self.suite.tls)),
-            CheckKind::Content => content_outcome(&self.fetch(&self.suite.content)),
+            CheckKind::Control => self.check(&self.suite.control, false, true),
+            CheckKind::Tls => self.check(&self.suite.tls, false, false),
+            CheckKind::Content => self.check(&self.suite.content, true, false),
         }
     }
 
     fn stop(&mut self, _id: &str) -> Result<(), TesterError> {
+        self.running = None;
         match self.process.take() {
             Some(mut process) => process
                 .stop()
@@ -210,6 +314,27 @@ mod tests {
             bytes_read,
             body_limited: false,
         }
+    }
+
+    #[test]
+    fn combine_uses_any_for_control_all_otherwise_and_slowest_speed() {
+        let ok = CheckOutcome::passed();
+        let fail = CheckOutcome::with_status(CheckStatus::Failed);
+        assert_eq!(combine(&[fail, ok], true).status, CheckStatus::Passed);
+        assert_eq!(combine(&[ok, fail], false).status, CheckStatus::Failed);
+        assert_eq!(combine(&[], false).status, CheckStatus::Failed);
+        let speeds = [CheckOutcome::content(900), CheckOutcome::content(300)];
+        assert_eq!(combine(&speeds, false).kbps, Some(300));
+    }
+
+    #[test]
+    fn user_sites_are_capped_in_the_tls_check() {
+        let sites: Vec<String> = (0..5).map(|i| format!("s{i}.example")).collect();
+        let suite = Suite::default().with_user_sites(&sites);
+        assert_eq!(
+            suite.tls.len(),
+            Suite::default().tls.len() + MAX_USER_TARGETS
+        );
     }
 
     #[test]

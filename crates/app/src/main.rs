@@ -1,13 +1,73 @@
+// GUI-subsystem exe on Windows: no console window when started from Explorer.
+#![cfg_attr(windows, windows_subsystem = "windows")]
+
 use std::{env, path::PathBuf, process::ExitCode};
 
+#[cfg_attr(not(windows), allow(dead_code, unused_imports))]
 mod autoselect;
+#[cfg_attr(not(windows), allow(dead_code, unused_imports))]
 mod bundle;
+#[cfg_attr(not(windows), allow(dead_code, unused_imports))]
+mod controller;
+#[cfg_attr(not(windows), allow(dead_code, unused_imports))]
 mod elevate;
+#[cfg_attr(not(windows), allow(dead_code, unused_imports))]
 mod embedded;
-mod run;
+#[cfg_attr(not(windows), allow(dead_code, unused_imports))]
+mod generated;
+#[cfg(windows)]
+mod gui;
+#[cfg_attr(not(windows), allow(dead_code, unused_imports))]
+mod lists;
+#[cfg_attr(not(windows), allow(dead_code, unused_imports))]
+mod settings;
+#[cfg(windows)]
+mod winutil;
 
-#[tokio::main]
-async fn main() -> ExitCode {
+fn main() -> ExitCode {
+    let first = env::args_os().nth(1);
+    let gui_mode = match first.as_deref() {
+        None => Some(false),
+        Some(arg) if arg == "--tray" => Some(true),
+        _ => None,
+    };
+    if let Some(start_hidden) = gui_mode {
+        return run_gui(start_hidden);
+    }
+    #[cfg(windows)]
+    winutil::attach_parent_console();
+    let runtime = match tokio::runtime::Runtime::new() {
+        Ok(runtime) => runtime,
+        Err(error) => {
+            eprintln!("cannot start async runtime: {error}");
+            return ExitCode::FAILURE;
+        }
+    };
+    runtime.block_on(cli())
+}
+
+#[cfg(windows)]
+fn run_gui(start_hidden: bool) -> ExitCode {
+    if !elevate::is_elevated() {
+        let args = if start_hidden { "--tray" } else { "" };
+        if elevate::relaunch_elevated(args) {
+            return ExitCode::SUCCESS;
+        }
+        winutil::message_box(
+            "ZapretA нужны права администратора: без них Windows не даёт менять сетевые пакеты.",
+        );
+        return ExitCode::FAILURE;
+    }
+    gui::run(start_hidden)
+}
+
+#[cfg(not(windows))]
+fn run_gui(_start_hidden: bool) -> ExitCode {
+    println!("ZapretA: the window and engine run on Windows only. CLI: --help");
+    ExitCode::SUCCESS
+}
+
+async fn cli() -> ExitCode {
     let mut args = env::args_os().skip(1);
     match args.next().as_deref() {
         Some(arg) if arg == "--version" => {
@@ -42,12 +102,13 @@ async fn main() -> ExitCode {
             )
             .await
         }
-        None => run::run().await,
-        Some(arg) if arg == "--run" => run::run().await,
         _ => {
-            println!("ZapretA — research build. Run without arguments for the one-click mode.");
+            println!("ZapretA {}", env!("CARGO_PKG_VERSION"));
             println!(
-                "Use --version, --validate-catalog <catalog.toml>, --validate-source-catalog <snapshot.toml>, --diagnose, --run, or --auto <winws.exe> <sha256> <snapshot-dir>."
+                "Without arguments: window + tray (Windows). --tray: start hidden in the tray."
+            );
+            println!(
+                "CLI: --version, --diagnose, --validate-catalog <catalog.toml>, --validate-source-catalog <snapshot.toml>, --auto <winws.exe> <sha256> <snapshot-dir>."
             );
             ExitCode::SUCCESS
         }

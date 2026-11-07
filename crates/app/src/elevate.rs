@@ -37,19 +37,20 @@ mod imp {
 
     /// Relaunches this executable with the UAC prompt. Returns false if the user
     /// declined or the launch failed.
-    pub fn relaunch_elevated() -> bool {
+    pub fn relaunch_elevated(args: &str) -> bool {
         let Ok(exe) = std::env::current_exe() else {
             return false;
         };
         let verb = wide(OsStr::new("runas"));
         let file = wide(exe.as_os_str());
+        let params = wide(OsStr::new(args));
         // SAFETY: all pointers are valid NUL-terminated UTF-16 buffers that outlive the call.
         let result = unsafe {
             ShellExecuteW(
                 std::ptr::null_mut(),
                 verb.as_ptr(),
                 file.as_ptr(),
-                std::ptr::null(),
+                params.as_ptr(),
                 std::ptr::null(),
                 SW_SHOWNORMAL,
             )
@@ -64,7 +65,7 @@ mod imp {
     pub fn is_elevated() -> bool {
         true
     }
-    pub fn relaunch_elevated() -> bool {
+    pub fn relaunch_elevated(_args: &str) -> bool {
         false
     }
 }

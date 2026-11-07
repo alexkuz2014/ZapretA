@@ -33,9 +33,10 @@
 | `bin/tls_clienthello_www_google_com.bin` | 681 | `936c2bee4cfb80aa3c426b2dcbcc834b3fbcd1adb17172959dc569c73a14275c` |
 | `bin/tls_clienthello_www_sferum_ru.bin` | 661 | `e6dd8d724eecc6a7340bf64e2ebec81c60bc4e078c6f702b4b6ba9bf184180ad` |
 | `cygwin1.dll` | 2954293 | `103104a52e5293ce418944725df19e2bf81ad9269b9a120d71d39028e821499b` |
-| `lists/ipset-all.txt` | 18 | `19123a22bf1108815c07bda3cda8df282b30bd63e4939949928969c0fd195873` |
 | `lists/ipset-exclude.txt` | 135 | `96c03954012765ce4ab03b9c30f29ab1ca1b698c6752224d03828e6d182eb0fc` |
 | `lists/list-exclude.txt` | 1726 | `e2de8403e1d2bd8ebd9de6b2cbfaab488d710681cbdcde2b219e71bc4490a56d` |
 | `lists/list-general.txt` | 1067 | `9ff3ae9e4bf0edbcf8fecb1bba7aac951aace2036cdb732ec3ef65dfc6db443b` |
 | `lists/list-google.txt` | 453 | `4104b8f5119f76a3642e3176987bbcf817d98daa4899a7ecf9ee2c254958e33b` |
 | `winws.exe` | 203776 | `affb4f69d2ea302a7abccd5325d81826e140ddae014f1e070bc4a6c0dd555188` |
+
+`lists/ipset-all.txt` и `lists/*-user.txt` не встроены: это списки пользователя (вкладки «IP-адреса», «Сайты», «Исключения»), при первом запуске создаются с пустым заполнителем `203.0.113.113/32` / `domain.example.abc` и потом никогда не перезаписываются.

@@ -10,6 +10,8 @@ use std::{
 /// Placeholder user lists, created only when absent and never overwritten so
 /// the user's own entries survive updates. Content matches upstream defaults.
 const USER_LISTS: &[(&str, &str)] = &[
+    // The user's own IPs/subnets; the placeholder is upstream's "no ipset" value.
+    ("lists/ipset-all.txt", "203.0.113.113/32\n"),
     ("lists/ipset-exclude-user.txt", "203.0.113.113/32\n"),
     (
         "lists/list-general-user.txt",

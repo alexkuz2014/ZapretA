@@ -110,6 +110,17 @@ Score: жёсткий gate по контрольной цели и HTTP/TLS за
 
 Последний локальный цикл на Windows x64 (commit `b7ef330`) прошёл `cargo fmt --all -- --check`, 38 workspace-тестов, Clippy `-D warnings`, release build, `cargo audit` и `cargo deny check`. Deny сообщает о двух парах дублирующихся транзитивных версий (`base64`, `winnow`); проверки advisory, bans, licenses и sources завершились успешно. Windows CI для этого commit завершил MSVC release build, SHA-256 manifest и upload artifact: https://github.com/alexkuz2014/ZapretA/actions/runs/41055761883. Ранее `--diagnose` получала HTTP 204 от YouTube и HTTP 200 от `example.com`; это единичный исторический запуск, не повторяемый тест.
 
+## Приложение (окно, трей, фон)
+
+- `ZapretA.exe` без аргументов — GUI-приложение (без консоли), сам запрашивает UAC. Одна копия на сеанс (именованный mutex); повторный запуск показывает уже открытое окно. Закрытие окна сворачивает в трей, обход продолжает работать; выход — через меню трея. `--tray` стартует скрытым (так его запускает автозапуск).
+- Автозапуск: задача планировщика `ZapretA` (`schtasks /SC ONLOGON /RL HIGHEST`), exe копируется в `%LOCALAPPDATA%\ZapretA\ZapretA.exe`, чтобы не зависеть от папки загрузок.
+- `controller.rs` — фоновый поток с собственным tokio runtime: распаковка и проверка движка, проверка без обхода, подбор, запуск победителя, watchdog (раз в 90 с; 2 провала подряд → переподбор; неудачный переподбор повторяется с паузой 5 мин, не больше 3 раз), перезапуск движка после правки списков. Отмена (Выключить/Подобрать заново/Выход) через флаг: старты кандидатов и проверки сразу проваливаются, перебор завершается быстро.
+- Явный запрос пользователя запускает подбор даже при «блокировок не видно»: страница YouTube может открываться при замедленном видео. Не запускается только при недоступности обоих контрольных сайтов.
+- Проверки: control — `example.com` или `www.microsoft.com` (любой); TLS — `www.youtube.com/generate_204`, `redirector.googlevideo.com/report_mapping` и до трёх сайтов пользователя (все); content — до 256 КБ с `www.youtube.com/` и превью с `i.ytimg.com` (2xx, скорость по самому медленному). Это всё ещё замена реальному видеочанку.
+- Кандидаты: 22 профиля Flowseal (сначала `general`), затем 29 собственных TLS-вариантов `generated.rs` по `blockcheck.sh` zapret v72.9: multisplit/multidisorder по позициям, seqovl, fake с ttl/autottl/badseq/badsum, fake+split гибриды, fakedsplit/fakeddisorder/hostfakesplit, wssize, `ts` последним. `md5sig`/`datanoack` не используются (по документации zapret ненадёжны для Windows-клиента). Тест проверяет, что каждое имя опции присутствует в таблице опций встроенного `winws.exe`, а каждый файл `bin/`/`lists/` встроен.
+- Свои сайты → `lists/list-general-user.txt` (используется и Flowseal-профилями, и нашими); свои IP → `lists/ipset-all.txt` (секция `--ipset` в наших стратегиях и в части Flowseal); исключения → `list-exclude-user.txt`, `ipset-exclude-user.txt`. Ввод нормализуется (ссылки → домен), ошибки показываются по номерам строк.
+- Проверено: Linux-тесты, Clippy `-D warnings` для `x86_64-pc-windows-gnu`, запуск окна под Wine (рендер, вкладки, проверка ввода, журнал). Не проверено: реальный WinDivert/winws, UAC, трей, schtasks и перебор на реальной сети с DPI.
+
 ## Открытые вопросы до этапа 2
 
 1. Какая лицензия/версия/хеши каждого бинарника Flowseal release и допустима ли перепаковка выбранных файлов? Проверить release assets и upstream licenses; текущая ветка репозитория сама по себе не источник бинарника.

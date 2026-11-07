@@ -142,11 +142,6 @@ pub static ENGINE_FILES: &[EmbeddedFile] = &[
         bytes: include_bytes!("../assets/engine/cygwin1.dll"),
     },
     EmbeddedFile {
-        path: "lists/ipset-all.txt",
-        sha256: "19123a22bf1108815c07bda3cda8df282b30bd63e4939949928969c0fd195873",
-        bytes: include_bytes!("../assets/engine/lists/ipset-all.txt"),
-    },
-    EmbeddedFile {
         path: "lists/ipset-exclude.txt",
         sha256: "96c03954012765ce4ab03b9c30f29ab1ca1b698c6752224d03828e6d182eb0fc",
         bytes: include_bytes!("../assets/engine/lists/ipset-exclude.txt"),

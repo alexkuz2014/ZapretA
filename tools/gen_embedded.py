@@ -9,7 +9,7 @@ for base, _, names in os.walk(assets):
     for n in names:
         full = os.path.join(base, n)
         rel = os.path.relpath(full, assets).replace(os.sep, "/")
-        if rel == "FLOWSEAL_LICENSE.txt":
+        if rel in ("FLOWSEAL_LICENSE.txt", "lists/ipset-all.txt"):
             continue
         files.append((rel, hashlib.sha256(open(full, "rb").read()).hexdigest()))
 files.sort()
