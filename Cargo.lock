@@ -1350,6 +1350,7 @@ version = "0.1.0"
 dependencies = [
  "tokio",
  "zapreta-core",
+ "zapreta-engine",
  "zapreta-net",
  "zapreta-probe",
 ]
