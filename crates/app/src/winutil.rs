@@ -105,6 +105,16 @@ pub fn hidden(program: impl AsRef<OsStr>) -> Command {
     command
 }
 
+/// Turns on TCP timestamps (RFC 7323), which Windows keeps off by default.
+/// Strategies that use `--dpi-desync-fooling=ts` have no effect without them;
+/// Flowseal's `service.bat` applies the same setting before starting winws.
+pub fn enable_tcp_timestamps() -> bool {
+    hidden("netsh")
+        .args(["interface", "tcp", "set", "global", "timestamps=enabled"])
+        .status()
+        .is_ok_and(|status| status.success())
+}
+
 pub fn open_url(url: &str) {
     let _ = hidden("rundll32")
         .args(["url.dll,FileProtocolHandler", url])

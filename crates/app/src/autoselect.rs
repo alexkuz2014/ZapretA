@@ -100,6 +100,9 @@ impl Default for Suite {
     }
 }
 
+/// Body bytes read from a user site; must exceed the ~16-20 KB stall budget.
+pub const SITE_READ_BYTES: usize = 128 * 1024;
+
 /// One independently judged goal of the search: YouTube, or one user site.
 #[derive(Debug, Clone)]
 pub struct TargetGroup {
@@ -124,10 +127,13 @@ impl TargetGroup {
         }
     }
 
+    /// Reads well past 16 KB: some filters let the handshake and the first
+    /// ~16 KB through and then stall the connection, which a short read would
+    /// report as a working site. A stalled body fails the read by timeout.
     pub fn site(host: &str) -> Self {
         Self {
             name: host.to_owned(),
-            checks: vec![(Target::new(host, "/", 16 * 1024), false)],
+            checks: vec![(Target::new(host, "/", SITE_READ_BYTES), false)],
         }
     }
 }
@@ -404,6 +410,12 @@ mod tests {
             bytes_read,
             body_limited: false,
         }
+    }
+
+    #[test]
+    fn site_check_reads_past_the_16_kb_stall_budget() {
+        let group = TargetGroup::site("example.org");
+        assert!(group.checks.iter().all(|(t, _)| t.max_bytes >= 64 * 1024));
     }
 
     #[test]

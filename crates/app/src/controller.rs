@@ -506,6 +506,12 @@ impl Worker {
         let verified = zapreta_engine::EngineBundle::new(root.join("winws.exe"), WINWS_SHA256)
             .verify()
             .map_err(|e| format!("Движок не прошёл проверку SHA-256: {e}"))?;
+        #[cfg(windows)]
+        if crate::winutil::enable_tcp_timestamps() {
+            self.log("Метки времени TCP включены (нужны части стратегий).");
+        } else {
+            self.log("Не удалось включить метки времени TCP: часть стратегий может не сработать.");
+        }
         self.loaded = all_candidates()?;
         let argv = self
             .loaded
