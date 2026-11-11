@@ -790,8 +790,14 @@ mod tests {
                 .unwrap();
         let host = AllowedHost::new("example.test", NetworkPurpose::Probe).unwrap();
         let error = prober.get(&host, "/refused", 16).await.unwrap_err();
-        // The cause chain must survive, not only "error sending request".
-        assert!(error.0.contains("[connect]"), "{}", error.0);
+        // The cause chain must survive, not only "error sending request". A
+        // closed port is refused at once on Linux, but Windows retries the SYN
+        // until the probe times out, so either kind tag is correct.
+        assert!(
+            error.0.contains("[connect]") || error.0.contains("[timeout]"),
+            "{}",
+            error.0
+        );
         assert!(error.0.matches(": ").count() >= 2, "{}", error.0);
     }
 
