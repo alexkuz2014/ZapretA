@@ -5,13 +5,14 @@
 
 use crate::{
     autoselect::{self, LiveTester, Loaded, Suite, TargetGroup},
-    bundle, dnsfix,
+    bundle, devlog, dnsfix,
     embedded::{ENGINE_ID, SNAPSHOTS, WINWS_SHA256},
     generated,
     lists::{self, ListKind},
     search::{self, Probe, SearchError, StartError, Verdict},
     settings::Settings,
 };
+use serde_json::json;
 use std::{
     collections::{HashMap, VecDeque},
     net::IpAddr,
@@ -34,6 +35,15 @@ const MAX_FAILED_RESEARCHES: u8 = 3;
 const LOG_LINES: usize = 400;
 /// User sites judged as separate goals (each costs a request per candidate).
 const MAX_SITE_GOALS: usize = 6;
+/// Resolved with both system DNS and DoH in the dev build, to tell DNS
+/// tampering apart from other kinds of blocking.
+const DEV_DNS_HOSTS: &[&str] = &[
+    "www.youtube.com",
+    "redirector.googlevideo.com",
+    "i.ytimg.com",
+    "discord.com",
+    "example.com",
+];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Phase {
@@ -232,7 +242,7 @@ pub fn explain(error: &SearchError, goals: &[GoalStatus]) -> String {
             } else {
                 format!(
                     "Ни одна из 51 стратегии не открыла: {}. Если сайт заблокирован по IP-адресу, \
-                     обработка пакетов не поможет — нужен VPN или прокси.",
+                     изменение пакетов на этом компьютере не поможет.",
                     broken.join(", ")
                 )
             }
@@ -306,13 +316,17 @@ struct Worker {
 
 impl Worker {
     fn set_phase(&self, phase: Phase) {
+        devlog::event("phase", json!({ "phase": format!("{phase:?}") }));
         lock(&self.shared).phase = phase;
         (self.notify)();
     }
 
     fn log(&self, line: impl Into<String>) {
+        let line = line.into();
+        devlog::note(&line);
+        devlog::event("log", json!({ "text": line }));
         let mut shared = lock(&self.shared);
-        shared.log.push_back(line.into());
+        shared.log.push_back(line);
         while shared.log.len() > LOG_LINES {
             shared.log.pop_front();
         }
@@ -394,14 +408,36 @@ impl Worker {
                 Err(RecvTimeoutError::Disconnected) => return Some(Command::Shutdown),
                 Err(RecvTimeoutError::Timeout) => {}
             }
-            let tester = self.tester.as_ref()?;
+            if devlog::ENABLED {
+                devlog::snapshot_dns_cache();
+                // The engine's debug log grows with traffic: restart onto a
+                // fresh file instead of letting it fill the disk.
+                if devlog::engine_log_needs_rotation() {
+                    self.log(
+                        "DEV: журнал движка слишком большой, перезапускаю движок с новым файлом.",
+                    );
+                    return Some(Command::ReloadLists);
+                }
+            }
+            let running_score = self.running_score;
+            let tester = self.tester.as_mut()?;
+            let engine_exited = tester.engine_exited();
             // No internet at all is not the strategy's fault: wait it out.
-            if !tester.control_ok() {
+            let control = tester.control_ok();
+            devlog::event(
+                "watchdog_control",
+                json!({ "control_ok": control, "engine_exited": engine_exited }),
+            );
+            if !control {
                 continue;
             }
             let score = (0..tester.groups().len())
                 .filter(|index| tester.group_ok(*index))
                 .count();
+            devlog::event(
+                "watchdog",
+                json!({ "score": score, "running_score": running_score, "failures_so_far": failures }),
+            );
             if score >= self.running_score {
                 failures = 0;
                 continue;
@@ -436,6 +472,7 @@ impl Worker {
     }
 
     fn handle_command(&mut self, command: Command, handle: &tokio::runtime::Handle) {
+        devlog::event("command", json!({ "command": format!("{command:?}") }));
         self.cancel.store(false, Ordering::SeqCst);
         if command != Command::Research {
             self.retry_pending = false;
@@ -503,6 +540,10 @@ impl Worker {
         let written = bundle::extract_default(root)
             .map_err(|e| format!("Не удалось распаковать движок: {e}"))?;
         self.log(format!("Движок готов ({written} файлов обновлено)."));
+        devlog::event(
+            "engine_prepared",
+            json!({ "files_written": written, "engine_id": ENGINE_ID, "winws_sha256": WINWS_SHA256 }),
+        );
         let verified = zapreta_engine::EngineBundle::new(root.join("winws.exe"), WINWS_SHA256)
             .verify()
             .map_err(|e| format!("Движок не прошёл проверку SHA-256: {e}"))?;
@@ -513,6 +554,10 @@ impl Worker {
             self.log("Не удалось включить метки времени TCP: часть стратегий может не сработать.");
         }
         self.loaded = all_candidates()?;
+        devlog::event(
+            "candidates",
+            json!({ "ids": self.loaded.iter().map(|c| c.id.as_str()).collect::<Vec<_>>() }),
+        );
         let argv = self
             .loaded
             .iter()
@@ -540,6 +585,40 @@ impl Worker {
                     .take(MAX_SITE_GOALS)
                     .map(|s| TargetGroup::site(s)),
             );
+        }
+        devlog::event(
+            "goals",
+            json!({
+                "groups": groups.iter().map(|g| g.name.as_str()).collect::<Vec<_>>(),
+                "user_sites": &sites,
+                "settings": format!("{settings:?}"),
+                "user_ips": lists::read(&self.paths.engine_root, ListKind::Ips),
+                "user_excludes": lists::read(&self.paths.engine_root, ListKind::ExcludeSites),
+            }),
+        );
+        if devlog::ENABLED {
+            if let Some(resolver) = self.resolver.as_ref() {
+                let mut names: Vec<String> =
+                    DEV_DNS_HOSTS.iter().map(|h| (*h).to_owned()).collect();
+                for site in &sites {
+                    names.push(site.clone());
+                    if !site.starts_with("www.") {
+                        names.push(format!("www.{site}"));
+                    }
+                }
+                for name in names {
+                    let system = handle.block_on(resolver.system(&name));
+                    let doh = handle.block_on(resolver.doh(&name));
+                    devlog::event(
+                        "dns",
+                        json!({
+                            "name": name,
+                            "system": format!("{system:?}"),
+                            "doh": format!("{doh:?}"),
+                        }),
+                    );
+                }
+            }
         }
         let mut overrides: Vec<(String, Vec<IpAddr>)> = Vec::new();
         if settings.fix_dns {
@@ -648,7 +727,24 @@ impl Worker {
         };
         // Always search on an explicit request: the page can load while video
         // is throttled, and the user asked for the bypass to be on.
+        devlog::event(
+            "search_start",
+            json!({ "goals": &goal_names, "cached": &cached, "forced_full": force_full, "candidates": ids.len() }),
+        );
         let report = search::search(&mut probe, &ids, cached.as_deref(), goal_names.len(), true);
+        devlog::event(
+            "search_report",
+            json!({
+                "goals": &goal_names,
+                "baseline": &report.baseline,
+                "verdicts": report.verdicts.iter().map(|(id, verdict)| json!({
+                    "id": id,
+                    "label": labels.get(id),
+                    "verdict": format!("{verdict:?}"),
+                })).collect::<Vec<_>>(),
+                "result": format!("{:?}", report.result),
+            }),
+        );
 
         {
             let mut shared = lock(&self.shared);
@@ -717,10 +813,14 @@ impl Worker {
             .filter(|(_, ok)| !**ok)
             .map(|(name, _)| name.as_str())
             .collect();
+        devlog::event(
+            "winner",
+            json!({ "id": &found.id, "label": &label, "goals": &goal_names, "results": &found.results }),
+        );
         self.log(format!("Работает: {label}."));
         if !still_broken.is_empty() {
             self.log(format!(
-                "Не открываются и с обходом: {}. Если сайт заблокирован по IP, нужен VPN или прокси.",
+                "Не открываются и с обходом: {}. Если сайт заблокирован по IP-адресу, локальный обход его не откроет.",
                 still_broken.join(", ")
             ));
         }

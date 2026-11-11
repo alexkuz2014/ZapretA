@@ -34,8 +34,14 @@ jobs:
       - name: Run Clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
 
+      - name: Run Clippy (dev logging build)
+        run: cargo clippy -p zapreta --all-targets --features devlog -- -D warnings
+
       - name: Run tests
         run: cargo test --workspace
+
+      - name: Run tests (dev logging build)
+        run: cargo test -p zapreta --features devlog
 
       - name: Install dependency audit tools
         run: |
@@ -68,6 +74,29 @@ jobs:
           path: |
             target/release/zapreta.exe
             SHA256SUMS.txt
+          if-no-files-found: error
+          retention-days: 14
+
+      # Separate artifact for collecting diagnostics on real networks. Never
+      # packaged into a release: the release job downloads only the build above.
+      - name: Build dev executable (detailed logging)
+        run: cargo build --release -p zapreta --features devlog --target-dir target-dev
+
+      - name: Create dev SHA-256 manifest
+        run: |
+          Copy-Item target-dev\release\zapreta.exe ZapretA-DEV.exe
+          $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath ZapretA-DEV.exe).Hash.ToLowerInvariant()
+          "$hash  ZapretA-DEV.exe" | Set-Content -Encoding ascii SHA256SUMS-DEV.txt
+          Get-Content SHA256SUMS-DEV.txt
+        shell: pwsh
+
+      - name: Upload dev build and checksum
+        uses: actions/upload-artifact@v7
+        with:
+          name: ZapretA-DEV-windows-x64
+          path: |
+            ZapretA-DEV.exe
+            SHA256SUMS-DEV.txt
           if-no-files-found: error
           retention-days: 14
 

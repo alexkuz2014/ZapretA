@@ -25,6 +25,7 @@ Windows-программа на Rust: один exe, который сам под
 - `bundle.rs` — распаковка в `%LOCALAPPDATA%\ZapretA\<ENGINE_ID>\` с проверкой хешей, атомарная запись.
 - `dnsfix.rs` — блок `# BEGIN ZapretA … # END ZapretA` в `hosts` по адресам DoH.
 - `lists.rs` — пользовательские списки (`list-general-user.txt`, `ipset-all.txt`, `*-exclude-user.txt`), нормализация ввода.
+- `devlog.rs` — **DEV-сборка** (`--features devlog`, артефакт CI `ZapretA-DEV-windows-x64`): подробные логи в `%LOCALAPPDATA%\ZapretA\devlogs`. В обычной сборке `devlog::ENABLED == false`, все вызовы мгновенно возвращаются. Подробности — `docs/DEV_LOGS.md`.
 - `settings.rs` — настройки + кэш победителя по `engine_id`.
 - `gui.rs`, `winutil.rs`, `elevate.rs` — только Windows: egui-окно, трей, mutex одной копии, schtasks-автозапуск, UAC.
 
@@ -36,12 +37,18 @@ Windows-программа на Rust: один exe, который сам под
 - `.github/workflows/windows.yml` — fmt, clippy `-D warnings`, test, cargo-audit, cargo-deny, release build; на тег `v*` — GitHub Release (prerelease).
 - `push.ps1` — локальный помощник автора (add -A, commit, push).
 
+## Когда пользователь присылает логи DEV-сборки
+
+Запустить `python3 -I tools/analyze_devlog.py <папка|zip|session_*.jsonl>` — сводка по сессиям: цели и сайты, DNS (системный vs DoH), вердикт по каждой стратегии, причины отказов проверок, вывод движка, хосты из `--debug`-лога. Решения о правках принимать по этим данным, формат событий описан в `docs/DEV_LOGS.md`.
+
 ## Команды
 
 ```bash
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
+cargo clippy -p zapreta --all-targets --features devlog -- -D warnings   # DEV-сборка
+cargo test -p zapreta --features devlog
 ```
 
 ## Известные проблемы (на 2026-11-10)
