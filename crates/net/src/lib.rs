@@ -155,6 +155,37 @@ const DOH_PROVIDERS: [DohProvider; 2] = [
     },
 ];
 
+/// Renders a request error with its whole cause chain and kind tags.
+///
+/// `reqwest` hides the cause behind "error sending request for url (..)", but
+/// whether the connection timed out, was reset or failed certificate checks is
+/// exactly what tells different kinds of blocking apart.
+fn describe(error: &reqwest::Error) -> String {
+    let mut tags = Vec::new();
+    if error.is_timeout() {
+        tags.push("timeout");
+    }
+    if error.is_connect() {
+        tags.push("connect");
+    }
+    if error.is_body() {
+        tags.push("body");
+    }
+    let mut text = if tags.is_empty() {
+        String::new()
+    } else {
+        format!("[{}] ", tags.join(","))
+    };
+    text.push_str(&error.to_string());
+    let mut source = std::error::Error::source(error);
+    while let Some(cause) = source {
+        text.push_str(": ");
+        text.push_str(&cause.to_string());
+        source = cause.source();
+    }
+    text
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HttpsProbeResult {
     pub hostname: String,
@@ -255,15 +286,16 @@ impl HttpsProber {
             .get(url)
             .send()
             .await
-            .map_err(|error| NetError(format!("HTTPS probe failed: {error}")))?;
+            .map_err(|error| NetError(format!("HTTPS probe failed: {}", describe(&error))))?;
         let status_code = response.status().as_u16();
         let mut bytes_read = 0_usize;
         let mut body_limited = false;
-        while let Some(chunk) = response
-            .chunk()
-            .await
-            .map_err(|error| NetError(format!("reading HTTPS probe response failed: {error}")))?
-        {
+        while let Some(chunk) = response.chunk().await.map_err(|error| {
+            NetError(format!(
+                "reading HTTPS probe response failed: {}",
+                describe(&error)
+            ))
+        })? {
             let remaining = max_bytes.saturating_sub(bytes_read);
             bytes_read += chunk.len().min(remaining);
             if chunk.len() > remaining {
@@ -757,7 +789,16 @@ mod tests {
             HttpsProber::with_test_base_url(Duration::from_secs(2), format!("http://{address}"))
                 .unwrap();
         let host = AllowedHost::new("example.test", NetworkPurpose::Probe).unwrap();
-        assert!(prober.get(&host, "/refused", 16).await.is_err());
+        let error = prober.get(&host, "/refused", 16).await.unwrap_err();
+        // The cause chain must survive, not only "error sending request". A
+        // closed port is refused at once on Linux, but Windows retries the SYN
+        // until the probe times out, so either kind tag is correct.
+        assert!(
+            error.0.contains("[connect]") || error.0.contains("[timeout]"),
+            "{}",
+            error.0
+        );
+        assert!(error.0.matches(": ").count() >= 2, "{}", error.0);
     }
 
     #[tokio::test]

@@ -190,6 +190,17 @@ impl VerifiedEngine {
     }
 
     pub fn spawn(&self, args: &[String]) -> Result<EngineProcess, EngineError> {
+        self.spawn_with_output(args, None)
+    }
+
+    /// Like [`VerifiedEngine::spawn`], but sends the engine's stdout and stderr
+    /// (start-up errors such as a refused driver) to `output` instead of
+    /// discarding them.
+    pub fn spawn_with_output(
+        &self,
+        args: &[String],
+        output: Option<std::fs::File>,
+    ) -> Result<EngineProcess, EngineError> {
         let conflicts = find_conflicting_processes()?;
         if !conflicts.is_empty() {
             return Err(EngineError(format!(
@@ -209,12 +220,20 @@ impl VerifiedEngine {
         #[cfg(target_os = "windows")]
         let job = create_kill_on_close_job()?;
         let mut command = Command::new(&self.executable);
-        command
-            .args(args)
-            .current_dir(parent)
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null());
+        command.args(args).current_dir(parent).stdin(Stdio::null());
+        match output {
+            Some(file) => {
+                let duplicate = file.try_clone().map_err(|error| {
+                    EngineError(format!("cannot share the engine output file: {error}"))
+                })?;
+                command
+                    .stdout(Stdio::from(file))
+                    .stderr(Stdio::from(duplicate));
+            }
+            None => {
+                command.stdout(Stdio::null()).stderr(Stdio::null());
+            }
+        }
         #[cfg(target_os = "windows")]
         {
             use std::os::windows::process::CommandExt;

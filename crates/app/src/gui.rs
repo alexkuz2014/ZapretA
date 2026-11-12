@@ -3,6 +3,7 @@
 
 use crate::{
     controller::{Command, Controller, Paths, Phase, Snapshot},
+    devlog,
     embedded::ENGINE_ID,
     lists::{self, ListKind},
     settings::Settings,
@@ -71,6 +72,8 @@ struct App {
     toggle_item: Option<MenuItem>,
     new_site: String,
     new_site_message: Option<(bool, String)>,
+    /// Dev build: result of the last "collect logs" click.
+    dev_message: Option<String>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -224,6 +227,7 @@ impl App {
             },
             new_site: String::new(),
             new_site_message: None,
+            dev_message: None,
             tray,
             tray_rx,
             tray_state: None,
@@ -405,6 +409,16 @@ impl App {
     }
 
     fn home(&mut self, ui: &mut egui::Ui) {
+        if devlog::ENABLED {
+            ui.label(
+                RichText::new(
+                    "DEV-версия: подробные логи пишутся на диск (вкладка «Журнал»). \
+                     Пользуйтесь программой как обычно, потом соберите архив логов.",
+                )
+                .color(Color32::from_rgb(220, 150, 30)),
+            );
+            ui.add_space(6.0);
+        }
         ui.label(RichText::new("Нужен конкретный сайт?").strong());
         ui.horizontal(|ui| {
             let response = ui.add(
@@ -588,6 +602,29 @@ impl App {
         if ui.button("Скопировать журнал").clicked() {
             ui.ctx().copy_text(self.snapshot.log.join("\n"));
         }
+        if devlog::ENABLED {
+            ui.horizontal(|ui| {
+                if ui.button("Открыть папку логов").clicked() {
+                    if let Some(dir) = devlog::dir() {
+                        winutil::open_folder(&dir);
+                    }
+                }
+                if ui.button("Собрать архив для отправки").clicked() {
+                    self.dev_message = Some(match devlog::make_archive() {
+                        Ok(zip) => {
+                            if let Some(parent) = zip.parent() {
+                                winutil::open_folder(parent);
+                            }
+                            format!("Готово: {}", zip.display())
+                        }
+                        Err(error) => format!("Не удалось собрать архив: {error}"),
+                    });
+                }
+            });
+            if let Some(message) = &self.dev_message {
+                ui.label(message);
+            }
+        }
         egui::ScrollArea::vertical()
             .stick_to_bottom(true)
             .auto_shrink([false, false])
@@ -703,6 +740,7 @@ pub fn run(start_hidden: bool) -> ExitCode {
         .parent()
         .map(PathBuf::from)
         .unwrap_or_else(|| paths.engine_root.clone());
+    devlog::init(&app_dir, &std::env::args().skip(1).collect::<Vec<_>>());
     let icon = egui::IconData {
         rgba: circle_rgba(64, state_color(TrayState::On)),
         width: 64,

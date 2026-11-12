@@ -2,6 +2,7 @@
 //! and HTTPS client. Mapping helpers are pure and unit-tested; `LiveTester`
 //! itself needs a verified engine binary and is exercised only on Windows.
 
+use crate::devlog;
 use std::{
     collections::HashMap,
     sync::{
@@ -11,7 +12,7 @@ use std::{
     time::Duration,
 };
 use tokio::runtime::Handle;
-use zapreta_engine::{EngineProcess, VerifiedEngine};
+use zapreta_engine::{EngineError, EngineProcess, VerifiedEngine};
 use zapreta_net::{AllowedHost, HttpsProbeResult, HttpsProber, NetError, NetworkPurpose};
 use zapreta_probe::{
     CheckStatus, EndpointResult, ProbeSignal, classify,
@@ -100,6 +101,9 @@ impl Default for Suite {
     }
 }
 
+/// Body bytes read from a user site; must exceed the ~16-20 KB stall budget.
+pub const SITE_READ_BYTES: usize = 128 * 1024;
+
 /// One independently judged goal of the search: YouTube, or one user site.
 #[derive(Debug, Clone)]
 pub struct TargetGroup {
@@ -124,10 +128,13 @@ impl TargetGroup {
         }
     }
 
+    /// Reads well past 16 KB: some filters let the handshake and the first
+    /// ~16 KB through and then stall the connection, which a short read would
+    /// report as a working site. A stalled body fails the read by timeout.
     pub fn site(host: &str) -> Self {
         Self {
             name: host.to_owned(),
-            checks: vec![(Target::new(host, "/", 16 * 1024), false)],
+            checks: vec![(Target::new(host, "/", SITE_READ_BYTES), false)],
         }
     }
 }
@@ -276,13 +283,17 @@ impl LiveTester {
                 return false;
             }
             let result = self.fetch(target);
-            if *content {
-                content_outcome(&result)
-                    .kbps
-                    .is_some_and(|kbps| kbps >= self.min_kbps)
+            let (passed, kbps) = if *content {
+                let kbps = content_outcome(&result).kbps;
+                (kbps.is_some_and(|kbps| kbps >= self.min_kbps), kbps)
             } else {
-                transport_outcome(&result).status == CheckStatus::Passed
-            }
+                (
+                    transport_outcome(&result).status == CheckStatus::Passed,
+                    None,
+                )
+            };
+            self.log_probe(&group.name, target, *content, &result, passed, kbps);
+            passed
         })
     }
 
@@ -297,15 +308,17 @@ impl LiveTester {
             .argv
             .get(id)
             .ok_or_else(|| StartError::Fatal(format!("unknown strategy {id}")))?;
-        let process = self
-            .engine
-            .spawn(argv)
-            .map_err(|error| StartError::Fatal(error.to_string()))?;
+        let process = self.spawn_engine(id, argv).map_err(|error| {
+            self.log_engine_output(id);
+            StartError::Fatal(error.to_string())
+        })?;
         self.process = Some(process);
         self.running = Some(id.to_owned());
         std::thread::sleep(self.warmup);
         let exited = self.process.as_mut().is_some_and(|p| p.has_exited());
         if exited {
+            devlog::event("engine_exited_early", serde_json::json!({ "strategy": id }));
+            self.log_engine_output(id);
             let _ = CandidateTester::stop(self, id);
             return Err(StartError::Exited);
         }
@@ -322,6 +335,113 @@ impl LiveTester {
 
     fn cancelled(&self) -> bool {
         self.cancel.load(Ordering::SeqCst)
+    }
+
+    /// Dev build: one event per probe with the raw result, the verdict and the
+    /// strategy that was active (null = no bypass running).
+    fn log_probe(
+        &self,
+        group: &str,
+        target: &Target,
+        content: bool,
+        result: &Result<HttpsProbeResult, NetError>,
+        passed: bool,
+        kbps: Option<u32>,
+    ) {
+        if !devlog::ENABLED {
+            return;
+        }
+        let (status, elapsed_ms, bytes, limited, error) = match result {
+            Ok(r) => (
+                Some(r.status_code),
+                Some(r.elapsed_ms as u64),
+                Some(r.bytes_read),
+                Some(r.body_limited),
+                None,
+            ),
+            Err(error) => (None, None, None, None, Some(error.0.clone())),
+        };
+        devlog::event(
+            "probe",
+            serde_json::json!({
+                "strategy": &self.running,
+                "group": group,
+                "host": &target.host,
+                "path": &target.path,
+                "content_check": content,
+                "max_bytes": target.max_bytes,
+                "passed": passed,
+                "status": status,
+                "elapsed_ms": elapsed_ms,
+                "bytes": bytes,
+                "body_limited": limited,
+                "kbps": kbps,
+                "min_kbps": self.min_kbps,
+                "error": error,
+            }),
+        );
+    }
+
+    /// Dev build only: has the running engine process exited by itself?
+    pub fn engine_exited(&mut self) -> Option<bool> {
+        self.process.as_mut().map(|process| process.has_exited())
+    }
+
+    /// Starts the engine for a candidate. The dev build adds the engine's own
+    /// `--debug=@file` log (per-connection hostnames, chosen desync profile)
+    /// and keeps its stdout/stderr, where driver errors appear.
+    fn spawn_engine(&self, id: &str, argv: &[String]) -> Result<EngineProcess, EngineError> {
+        let Some(log) = devlog::engine_log(id) else {
+            return self.engine.spawn(argv);
+        };
+        let mut full = vec![format!("--debug=@{}", log.debug_arg)];
+        full.extend(argv.iter().cloned());
+        devlog::event(
+            "engine_start",
+            serde_json::json!({
+                "strategy": id,
+                "argv": &full,
+                "debug_log": log.debug_path.file_name().map(|n| n.to_string_lossy().into_owned()),
+                "output_log": log.output_path.file_name().map(|n| n.to_string_lossy().into_owned()),
+            }),
+        );
+        let output = std::fs::File::create(&log.output_path).ok();
+        let result = self.engine.spawn_with_output(&full, output);
+        match &result {
+            Ok(process) => devlog::event(
+                "engine_started",
+                serde_json::json!({ "strategy": id, "pid": process.process_id() }),
+            ),
+            Err(error) => devlog::event(
+                "engine_start_failed",
+                serde_json::json!({ "strategy": id, "error": error.to_string() }),
+            ),
+        }
+        result
+    }
+
+    fn log_engine_output(&self, id: &str) {
+        if !devlog::ENABLED {
+            return;
+        }
+        let Some(dir) = devlog::dir() else { return };
+        let mut outputs: Vec<_> = std::fs::read_dir(dir)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .filter(|e| e.file_name().to_string_lossy().ends_with(".out.txt"))
+            .collect();
+        outputs.sort_by_key(|e| e.file_name());
+        if let Some(last) = outputs.last() {
+            devlog::event(
+                "engine_output",
+                serde_json::json!({
+                    "strategy": id,
+                    "file": last.file_name().to_string_lossy(),
+                    "tail": devlog::read_tail(&last.path(), 4000),
+                }),
+            );
+        }
     }
 
     fn fetch(&self, target: &Target) -> Result<HttpsProbeResult, NetError> {
@@ -344,6 +464,14 @@ impl LiveTester {
                 transport_outcome(&result)
             };
             let passed = outcome.status == CheckStatus::Passed;
+            self.log_probe(
+                if any { "control" } else { "suite" },
+                target,
+                content,
+                &result,
+                passed,
+                outcome.kbps,
+            );
             outcomes.push(outcome);
             // Short-circuit: one pass decides `any`, one failure decides `all`.
             if any == passed {
@@ -364,8 +492,7 @@ impl CandidateTester for LiveTester {
             .get(id)
             .ok_or_else(|| TesterError(format!("unknown strategy {id}")))?;
         let process = self
-            .engine
-            .spawn(argv)
+            .spawn_engine(id, argv)
             .map_err(|error| TesterError(error.to_string()))?;
         self.process = Some(process);
         self.running = Some(id.to_owned());
@@ -382,11 +509,19 @@ impl CandidateTester for LiveTester {
     }
 
     fn stop(&mut self, _id: &str) -> Result<(), TesterError> {
-        self.running = None;
+        let stopped = self.running.take();
         match self.process.take() {
-            Some(mut process) => process
-                .stop()
-                .map_err(|error| TesterError(error.to_string())),
+            Some(mut process) => {
+                let result = process
+                    .stop()
+                    .map_err(|error| TesterError(error.to_string()));
+                devlog::event(
+                    "engine_stop",
+                    serde_json::json!({ "strategy": stopped, "ok": result.is_ok(),
+                        "error": result.as_ref().err().map(|e| e.0.clone()) }),
+                );
+                result
+            }
             None => Ok(()),
         }
     }
@@ -404,6 +539,12 @@ mod tests {
             bytes_read,
             body_limited: false,
         }
+    }
+
+    #[test]
+    fn site_check_reads_past_the_16_kb_stall_budget() {
+        let group = TargetGroup::site("example.org");
+        assert!(group.checks.iter().all(|(t, _)| t.max_bytes >= 64 * 1024));
     }
 
     #[test]
